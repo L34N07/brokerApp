@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Panel IOL Broker</title>
+  <style>
+    :root {
+      --bg: #eef1f0;
+      --bg-soft: #f7f9f8;
+      --surface: #ffffff;
+      --text: #273136;
+      --muted: #6f7d78;
+      --border: #dbe3df;
+      --green: #2d8a68;
+      --green-soft: #e3f2eb;
+      --red: #bb4f5b;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 0% 0%, #f9fbfa 0, transparent 45%),
+        radial-gradient(circle at 100% 100%, #e8f3ee 0, transparent 38%),
+        linear-gradient(180deg, var(--bg-soft) 0%, var(--bg) 100%);
+      min-height: 100vh;
+      padding: 32px 20px 42px;
+    }
+
+    .layout {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    .title {
+      margin: 0 0 6px 0;
+      font-size: 2rem;
+      letter-spacing: 0.02em;
+    }
+
+    .subtitle {
+      margin: 0;
+      color: var(--muted);
+      font-size: 0.98rem;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin: 22px 0 16px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 10px 16px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      background: var(--green);
+      color: white;
+      cursor: pointer;
+      transition: transform 120ms ease, background 120ms ease;
+    }
+
+    button:hover:not(:disabled) {
+      background: #247a5b;
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .status-text {
+      font-size: 0.95rem;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: #f6f8f7;
+    }
+
+    .status-text.ok {
+      color: #1f6f53;
+      background: var(--green-soft);
+      border-color: #cde7db;
+    }
+
+    .status-text.error {
+      color: #8e2f3a;
+      background: #f9ecee;
+      border-color: #f2d4d8;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 10px 24px rgba(29, 49, 42, 0.06);
+    }
+
+    .portfolio-header {
+      font-weight: 700;
+      color: #33534a;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(180deg, #fbfdfc 0%, #f4f8f6 100%);
+    }
+
+    .portfolio-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 0.94rem;
+    }
+
+    .portfolio-table th {
+      text-align: left;
+      color: #49635b;
+      background: #f8fbf9;
+      border-bottom: 1px solid var(--border);
+      padding: 10px 12px;
+      font-weight: 600;
+    }
+
+    .portfolio-table td {
+      border-bottom: 1px solid #edf2ef;
+      padding: 10px 12px;
+    }
+
+    .portfolio-table tr:nth-child(even) td {
+      background: #fcfdfd;
+    }
+
+    .profit {
+      color: #1f7a56;
+      font-weight: 600;
+    }
+
+    .loss {
+      color: var(--red);
+      font-weight: 600;
+    }
+
+    .response-block {
+      padding: 16px;
+      color: #6f4a4f;
+      background: #fff7f8;
+      border-top: 1px solid #f2dfe2;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+
+    @media (max-width: 900px) {
+      .panel {
+        overflow-x: auto;
+      }
+
+      .portfolio-table {
+        min-width: 760px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="layout">
+    <h1 class="title">Panel IOL Broker</h1>
+    <p class="subtitle">Estado de conexión y consulta manual de portafolio.</p>
+
+    <section class="toolbar">
+      <button id="btn-load-portfolio" type="button">Actualizar portafolio</button>
+      <span id="status-text" class="status-text">Verificando token...</span>
+    </section>
+
+    <section id="portfolio" class="panel"></section>
+  </main>
+
+  <script src="./renderer.js"></script>
+</body>
+</html>

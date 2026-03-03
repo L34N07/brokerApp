@@ -1,0 +1,8 @@
+node_modules/
+__pycache__/
+*.pyc
+
+# Local secrets (never commit)
+credentials.json
+token.json
+.env

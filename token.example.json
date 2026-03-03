@@ -1,0 +1,6 @@
+{
+  "access_token": "pega_aqui_un_access_token_temporal",
+  "token_type": "bearer",
+  "expires_in": 1200,
+  "refresh_token": "pega_aqui_un_refresh_token"
+}
