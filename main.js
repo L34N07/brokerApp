@@ -4,10 +4,17 @@ const path = require('path');
 
 const PYTHON_BIN = process.env.PYTHON_BIN || 'python3';
 const PYTHON_SCRIPT = path.join(__dirname, 'script.py');
+let mainWindow = null;
+let loginWindow = null;
+let operationsWindow = null;
 
-function runPythonCommand(command) {
+function runPythonCommand(command, payload = null) {
   return new Promise((resolve, reject) => {
-    const child = spawn(PYTHON_BIN, [PYTHON_SCRIPT, command], { stdio: ['ignore', 'pipe', 'pipe'] });
+    const args = [PYTHON_SCRIPT, command];
+    if (payload && typeof payload === 'object') {
+      args.push(JSON.stringify(payload));
+    }
+    const child = spawn(PYTHON_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
     let stdout = '';
     let stderr = '';
@@ -53,8 +60,13 @@ function runPythonCommand(command) {
   });
 }
 
-function createWindow() {
-  const win = new BrowserWindow({
+function createMainWindow() {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.focus();
+    return mainWindow;
+  }
+
+  mainWindow = new BrowserWindow({
     width: 1040,
     height: 760,
     webPreferences: {
@@ -64,12 +76,63 @@ function createWindow() {
     }
   });
 
-  win.loadFile('index.html');
+  mainWindow.loadFile('index.html');
+  mainWindow.on('closed', () => {
+    mainWindow = null;
+  });
+  return mainWindow;
 }
 
-ipcMain.handle('broker:check-token', async () => {
+function createLoginWindow() {
+  if (loginWindow && !loginWindow.isDestroyed()) {
+    loginWindow.focus();
+    return loginWindow;
+  }
+
+  loginWindow = new BrowserWindow({
+    width: 640,
+    height: 540,
+    resizable: false,
+    maximizable: false,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  loginWindow.loadFile('login.html');
+  loginWindow.on('closed', () => {
+    loginWindow = null;
+  });
+  return loginWindow;
+}
+
+function createOperationsWindow() {
+  if (operationsWindow && !operationsWindow.isDestroyed()) {
+    operationsWindow.focus();
+    return;
+  }
+
+  operationsWindow = new BrowserWindow({
+    width: 1280,
+    height: 860,
+    webPreferences: {
+      preload: path.join(__dirname, 'preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  operationsWindow.loadFile('operaciones.html');
+  operationsWindow.on('closed', () => {
+    operationsWindow = null;
+  });
+}
+
+ipcMain.handle('broker:check-token', async (_event, payload) => {
   try {
-    return await runPythonCommand('check-token');
+    return await runPythonCommand('check-token', payload || {});
   } catch (error) {
     return {
       estado: 'error',
@@ -78,9 +141,9 @@ ipcMain.handle('broker:check-token', async () => {
   }
 });
 
-ipcMain.handle('broker:get-portfolio', async () => {
+ipcMain.handle('broker:get-portfolio', async (_event, payload) => {
   try {
-    return await runPythonCommand('portfolio');
+    return await runPythonCommand('portfolio', payload || {});
   } catch (error) {
     return {
       estado: 'error',
@@ -89,7 +152,88 @@ ipcMain.handle('broker:get-portfolio', async () => {
   }
 });
 
-app.whenReady().then(createWindow);
+ipcMain.handle('broker:get-account-status', async (_event, payload) => {
+  try {
+    return await runPythonCommand('account-status', payload || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
+ipcMain.handle('broker:get-operations', async (_event, filters) => {
+  try {
+    return await runPythonCommand('operations', filters || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
+ipcMain.handle('broker:open-operations-window', () => {
+  createOperationsWindow();
+  return { estado: 'ok' };
+});
+
+ipcMain.handle('broker:open-login-window', () => {
+  createLoginWindow();
+  return { estado: 'ok' };
+});
+
+ipcMain.handle('broker:activate-session', () => {
+  createMainWindow();
+  if (loginWindow && !loginWindow.isDestroyed()) {
+    loginWindow.close();
+  }
+  return { estado: 'ok' };
+});
+
+ipcMain.handle('broker:list-accounts', async () => {
+  try {
+    return await runPythonCommand('list-accounts');
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
+ipcMain.handle('broker:login', async (_event, payload) => {
+  try {
+    return await runPythonCommand('login', payload || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
+ipcMain.handle('broker:select-account', async (_event, payload) => {
+  try {
+    return await runPythonCommand('select-account', payload || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
+app.whenReady().then(() => {
+  createLoginWindow();
+});
+
+app.on('activate', () => {
+  if (BrowserWindow.getAllWindows().length === 0) {
+    createLoginWindow();
+  }
+});
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {

@@ -1,6 +1,17 @@
 {
-  "access_token": "pega_aqui_un_access_token_temporal",
-  "token_type": "bearer",
-  "expires_in": 1200,
-  "refresh_token": "pega_aqui_un_refresh_token"
+  "active_username": "usuario_1",
+  "accounts": {
+    "usuario_1": {
+      "access_token": "token_usuario_1",
+      "token_type": "bearer",
+      "expires_in": 1200,
+      "refresh_token": "refresh_token_usuario_1"
+    },
+    "usuario_2": {
+      "access_token": "token_usuario_2",
+      "token_type": "bearer",
+      "expires_in": 1200,
+      "refresh_token": "refresh_token_usuario_2"
+    }
+  }
 }

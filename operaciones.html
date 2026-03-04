@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Operaciones - Panel IOL</title>
+  <style>
+    :root {
+      --bg: #eef1f0;
+      --bg-soft: #f7f9f8;
+      --surface: #ffffff;
+      --text: #273136;
+      --muted: #6f7d78;
+      --border: #dbe3df;
+      --green: #2d8a68;
+      --green-soft: #e3f2eb;
+      --red: #bb4f5b;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 0% 0%, #f9fbfa 0, transparent 45%),
+        radial-gradient(circle at 100% 100%, #e8f3ee 0, transparent 38%),
+        linear-gradient(180deg, var(--bg-soft) 0%, var(--bg) 100%);
+      min-height: 100vh;
+      padding: 24px 18px 36px;
+    }
+
+    .layout {
+      max-width: 1320px;
+      margin: 0 auto;
+      display: grid;
+      gap: 14px;
+    }
+
+    .title {
+      margin: 0;
+      font-size: 1.8rem;
+      letter-spacing: 0.02em;
+    }
+
+    .subtitle {
+      margin: 4px 0 0 0;
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .panel {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      box-shadow: 0 10px 24px rgba(29, 49, 42, 0.06);
+      overflow: hidden;
+    }
+
+    .panel-body {
+      padding: 14px;
+    }
+
+    .controls {
+      display: grid;
+      gap: 12px;
+    }
+
+    .controls-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(140px, 1fr));
+      gap: 10px;
+    }
+
+    .control {
+      display: grid;
+      gap: 6px;
+    }
+
+    .control label {
+      color: #49635b;
+      font-size: 0.84rem;
+      font-weight: 600;
+    }
+
+    .control input {
+      border: 1px solid #cedbd5;
+      border-radius: 10px;
+      padding: 8px 10px;
+      color: var(--text);
+      background: #fbfdfc;
+      font-size: 0.92rem;
+    }
+
+    .toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      padding: 10px 16px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      background: var(--green);
+      color: white;
+      cursor: pointer;
+      transition: transform 120ms ease, background 120ms ease;
+    }
+
+    button:hover:not(:disabled) {
+      background: #247a5b;
+      transform: translateY(-1px);
+    }
+
+    button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .status-text {
+      font-size: 0.93rem;
+      padding: 8px 12px;
+      border-radius: 999px;
+      border: 1px solid var(--border);
+      background: #f6f8f7;
+    }
+
+    .status-text.ok {
+      color: #1f6f53;
+      background: var(--green-soft);
+      border-color: #cde7db;
+    }
+
+    .status-text.error {
+      color: #8e2f3a;
+      background: #f9ecee;
+      border-color: #f2d4d8;
+    }
+
+    .filters-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 14px;
+      padding: 14px;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      background: #f8fbf9;
+    }
+
+    .filter-title {
+      margin: 0 0 8px 0;
+      font-size: 0.84rem;
+      color: #49635b;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .check-list {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .check-list label {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: #3d5550;
+      font-size: 0.9rem;
+    }
+
+    .table-wrap {
+      overflow: auto;
+    }
+
+    table {
+      width: 100%;
+      min-width: 1120px;
+      border-collapse: collapse;
+      font-size: 0.92rem;
+    }
+
+    th {
+      text-align: left;
+      color: #49635b;
+      background: #f8fbf9;
+      border-bottom: 1px solid var(--border);
+      padding: 9px 10px;
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    td {
+      border-bottom: 1px solid #edf2ef;
+      padding: 8px 10px;
+      white-space: nowrap;
+    }
+
+    tr:nth-child(even) td {
+      background: #fcfdfd;
+    }
+
+    .tag {
+      display: inline-block;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 0.8rem;
+      border: 1px solid var(--border);
+      background: #f6f8f7;
+      color: #49635b;
+    }
+
+    .tag-compra {
+      background: #e9f6f0;
+      border-color: #cde9dc;
+      color: #1f6f53;
+    }
+
+    .tag-venta {
+      background: #f9ecee;
+      border-color: #f1d6da;
+      color: #9c3f4b;
+    }
+
+    .empty {
+      padding: 18px;
+      color: #6f7d78;
+    }
+
+    @media (max-width: 950px) {
+      .controls-grid {
+        grid-template-columns: repeat(2, minmax(140px, 1fr));
+      }
+
+      .filters-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+  </style>
+</head>
+<body>
+  <main class="layout">
+    <header>
+      <h1 class="title">Operaciones</h1>
+      <p class="subtitle">Consulta por rango de fecha/hora y filtrado local por tipo y estado.</p>
+    </header>
+
+    <section class="panel">
+      <div class="panel-body controls">
+        <div class="controls-grid">
+          <div class="control">
+            <label for="fecha-desde">Fecha desde</label>
+            <input id="fecha-desde" type="date">
+          </div>
+          <div class="control">
+            <label for="fecha-hasta">Fecha hasta</label>
+            <input id="fecha-hasta" type="date">
+          </div>
+          <div class="control">
+            <label for="hora-desde">Hora desde</label>
+            <input id="hora-desde" type="time" step="1">
+          </div>
+          <div class="control">
+            <label for="hora-hasta">Hora hasta</label>
+            <input id="hora-hasta" type="time" step="1">
+          </div>
+        </div>
+
+        <div class="toolbar">
+          <button id="btn-load-operations" type="button">Buscar operaciones</button>
+          <button id="btn-change-account" type="button">Cambiar Cuenta</button>
+          <span id="status-text" class="status-text">Cargando cuenta activa...</span>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="filters-grid">
+        <div>
+          <p class="filter-title">Filtro tipo</p>
+          <div class="check-list">
+            <label><input type="checkbox" data-type="compra" checked> Compra</label>
+            <label><input type="checkbox" data-type="venta" checked> Venta</label>
+            <label><input type="checkbox" data-type="otro" checked> Otros</label>
+          </div>
+        </div>
+        <div>
+          <p class="filter-title">Filtro estado</p>
+          <div class="check-list">
+            <label><input type="checkbox" data-status="pendientes" checked> Pendientes</label>
+            <label><input type="checkbox" data-status="terminadas" checked> Terminadas</label>
+            <label><input type="checkbox" data-status="canceladas" checked> Canceladas</label>
+            <label><input type="checkbox" data-status="otras" checked> Otras</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Número</th>
+              <th>Fecha orden</th>
+              <th>Tipo</th>
+              <th>Estado</th>
+              <th>Mercado</th>
+              <th>Símbolo</th>
+              <th>Cantidad</th>
+              <th>Monto</th>
+              <th>Modalidad</th>
+              <th>Precio</th>
+              <th>Fecha operada</th>
+              <th>Cantidad operada</th>
+              <th>Precio operado</th>
+              <th>Monto operado</th>
+              <th>Plazo</th>
+            </tr>
+          </thead>
+          <tbody id="operations-body"></tbody>
+        </table>
+      </div>
+      <div id="operations-empty" class="empty">No hay datos cargados.</div>
+    </section>
+  </main>
+
+  <script src="./operations.js"></script>
+</body>
+</html>

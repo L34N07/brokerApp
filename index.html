@@ -109,7 +109,7 @@
       box-shadow: 0 10px 24px rgba(29, 49, 42, 0.06);
     }
 
-    .portfolio-header {
+    .panel-header {
       font-weight: 700;
       color: #33534a;
       padding: 14px 16px;
@@ -117,13 +117,19 @@
       background: linear-gradient(180deg, #fbfdfc 0%, #f4f8f6 100%);
     }
 
-    .portfolio-table {
+    .grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 14px;
+    }
+
+    .data-table {
       width: 100%;
       border-collapse: collapse;
       font-size: 0.94rem;
     }
 
-    .portfolio-table th {
+    .data-table th {
       text-align: left;
       color: #49635b;
       background: #f8fbf9;
@@ -132,12 +138,12 @@
       font-weight: 600;
     }
 
-    .portfolio-table td {
+    .data-table td {
       border-bottom: 1px solid #edf2ef;
       padding: 10px 12px;
     }
 
-    .portfolio-table tr:nth-child(even) td {
+    .data-table tr:nth-child(even) td {
       background: #fcfdfd;
     }
 
@@ -165,7 +171,7 @@
         overflow-x: auto;
       }
 
-      .portfolio-table {
+      .data-table {
         min-width: 760px;
       }
     }
@@ -173,15 +179,20 @@
 </head>
 <body>
   <main class="layout">
-    <h1 class="title">Panel IOL Broker</h1>
-    <p class="subtitle">Estado de conexión y consulta manual de portafolio.</p>
+    <h1 class="title">Panel IOL</h1>
 
     <section class="toolbar">
-      <button id="btn-load-portfolio" type="button">Actualizar portafolio</button>
-      <span id="status-text" class="status-text">Verificando token...</span>
+      <button id="btn-load-portfolio" type="button">Ver Portafolio</button>
+      <button id="btn-load-account-status" type="button">Ver Estado de Cuenta</button>
+      <button id="btn-open-operations" type="button">Ver Operaciones</button>
+      <button id="btn-change-account" type="button">Cambiar Cuenta</button>
+      <span id="status-text" class="status-text">Cargando cuenta activa...</span>
     </section>
 
-    <section id="portfolio" class="panel"></section>
+    <section class="grid">
+      <section id="portfolio" class="panel"></section>
+      <section id="account-status" class="panel"></section>
+    </section>
   </main>
 
   <script src="./renderer.js"></script>
