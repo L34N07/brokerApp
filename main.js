@@ -67,8 +67,10 @@ function createMainWindow() {
   }
 
   mainWindow = new BrowserWindow({
-    width: 1040,
-    height: 760,
+    width: 1180,
+    height: 840,
+    minWidth: 980,
+    minHeight: 700,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -90,10 +92,10 @@ function createLoginWindow() {
   }
 
   loginWindow = new BrowserWindow({
-    width: 640,
-    height: 540,
-    resizable: false,
-    maximizable: false,
+    width: 760,
+    height: 620,
+    minWidth: 620,
+    minHeight: 520,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,

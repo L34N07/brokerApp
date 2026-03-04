@@ -7,6 +7,24 @@ const portfolioContainer = document.getElementById('portfolio');
 const accountContainer = document.getElementById('account-status');
 
 let activeUsername = '';
+const integerNumberFormatter = new Intl.NumberFormat('es-AR', {
+  maximumFractionDigits: 0
+});
+const decimalFormatters = new Map();
+
+function getDecimalFormatter(decimals) {
+  if (!decimalFormatters.has(decimals)) {
+    decimalFormatters.set(
+      decimals,
+      new Intl.NumberFormat('es-AR', {
+        minimumFractionDigits: decimals,
+        maximumFractionDigits: decimals
+      })
+    );
+  }
+
+  return decimalFormatters.get(decimals);
+}
 
 function safeText(value, fallback = 'N/A') {
   if (value === null || value === undefined) {
@@ -22,7 +40,15 @@ function toNumber(value) {
 
 function formatNumber(value, decimals = 2) {
   const number = toNumber(value);
-  return number === null ? 'N/A' : number.toFixed(decimals);
+  if (number === null) {
+    return 'N/A';
+  }
+
+  const rounded = Number(number.toFixed(decimals));
+  if (decimals > 0 && Number.isInteger(rounded)) {
+    return integerNumberFormatter.format(rounded);
+  }
+  return getDecimalFormatter(decimals).format(rounded);
 }
 
 function formatMoney(value, symbol) {
