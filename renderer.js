@@ -1,4 +1,3 @@
-const statusText = document.getElementById('status-text');
 const portfolioButton = document.getElementById('btn-load-portfolio');
 const accountButton = document.getElementById('btn-load-account-status');
 const operationsButton = document.getElementById('btn-open-operations');
@@ -7,10 +6,64 @@ const portfolioContainer = document.getElementById('portfolio');
 const accountContainer = document.getElementById('account-status');
 
 let activeUsername = '';
+let toastNode = null;
+let toastTimeoutId = null;
+let hasShownActiveAccountToast = false;
 const integerNumberFormatter = new Intl.NumberFormat('es-AR', {
   maximumFractionDigits: 0
 });
 const decimalFormatters = new Map();
+
+function ensureToastNode() {
+  let styleNode = document.getElementById('broker-toast-style');
+  if (!styleNode) {
+    styleNode = document.createElement('style');
+    styleNode.id = 'broker-toast-style';
+    styleNode.textContent = `
+      .broker-toast {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 9999;
+        max-width: min(420px, calc(100vw - 24px));
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid #dbe3df;
+        background: #f6f8f7;
+        color: #2c3a3f;
+        font-size: 0.9rem;
+        box-shadow: 0 12px 28px rgba(29, 49, 42, 0.18);
+        opacity: 0;
+        transform: translateY(8px);
+        pointer-events: none;
+        transition: opacity 120ms ease, transform 120ms ease;
+      }
+      .broker-toast.show {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      .broker-toast.ok {
+        color: #1f6f53;
+        background: #e3f2eb;
+        border-color: #cde7db;
+      }
+      .broker-toast.error {
+        color: #8e2f3a;
+        background: #f9ecee;
+        border-color: #f2d4d8;
+      }
+    `;
+    document.head.appendChild(styleNode);
+  }
+
+  if (!toastNode) {
+    toastNode = document.createElement('div');
+    toastNode.className = 'broker-toast';
+    document.body.appendChild(toastNode);
+  }
+
+  return toastNode;
+}
 
 function getDecimalFormatter(decimals) {
   if (!decimalFormatters.has(decimals)) {
@@ -61,9 +114,22 @@ function clearNode(node) {
   }
 }
 
-function setStatus(message, tone = 'neutral') {
-  statusText.textContent = message;
-  statusText.className = `status-text ${tone}`;
+function setStatus(message, tone = 'neutral', options = {}) {
+  if (options.silent || !message) {
+    return;
+  }
+
+  const node = ensureToastNode();
+  node.textContent = String(message);
+  node.className = `broker-toast ${tone}`;
+  node.classList.add('show');
+
+  if (toastTimeoutId !== null) {
+    clearTimeout(toastTimeoutId);
+  }
+  toastTimeoutId = setTimeout(() => {
+    node.classList.remove('show');
+  }, 2000);
 }
 
 function setActionsEnabled(enabled) {
@@ -181,13 +247,18 @@ async function refreshActiveAccount() {
     throw new Error(response.mensaje || 'No se pudo cargar la cuenta activa.');
   }
 
+  const previousUsername = activeUsername;
   activeUsername = safeText(response.active_username, '').trim();
   if (activeUsername) {
     setActionsEnabled(true);
-    setStatus(`Cuenta activa: ${activeUsername}.`, 'ok');
+    if (!hasShownActiveAccountToast || activeUsername !== previousUsername) {
+      setStatus(`Cuenta activa: ${activeUsername}.`, 'ok');
+      hasShownActiveAccountToast = true;
+    }
     return;
   }
 
+  hasShownActiveAccountToast = false;
   setActionsEnabled(false);
   setStatus('No hay cuenta activa. Usá "Cambiar Cuenta".', 'error');
 }
@@ -257,7 +328,6 @@ async function openLoginWindow() {
 
 async function initialize() {
   setActionsEnabled(false);
-  setStatus('Cargando cuenta activa...', 'neutral');
   try {
     await refreshActiveAccount();
   } catch (error) {

@@ -1,19 +1,49 @@
+const menuButton = document.getElementById('btn-top-menu');
+const topMenu = document.getElementById('top-menu');
 const reloadButton = document.getElementById('btn-reload-operations');
-const changeAccountButton = document.getElementById('btn-change-account');
-const statusText = document.getElementById('status-text');
-const dataRangeText = document.getElementById('data-range');
-const dataSummary = document.getElementById('data-summary');
+const autoRefreshToggle = document.getElementById('auto-refresh-enabled');
+const autoRefreshIntervalSelect = document.getElementById('auto-refresh-interval');
+const autoRefreshLight = document.getElementById('auto-refresh-light');
+const autoRefreshLabel = document.getElementById('auto-refresh-label');
+const lastRefreshText = document.getElementById('last-refresh-text');
+
 const chartsGrid = document.getElementById('charts-grid');
 const gridAddZone = document.getElementById('grid-add-zone');
 const addChartInitialButton = document.getElementById('btn-add-chart-initial');
+
+const detailedDateFromInput = document.getElementById('detail-date-from');
+const detailedTimeFromInput = document.getElementById('detail-time-from');
+const detailedDateToInput = document.getElementById('detail-date-to');
+const detailedTimeToInput = document.getElementById('detail-time-to');
+const detailedTypeSelect = document.getElementById('detail-type-filter');
+const detailedLoadButton = document.getElementById('btn-load-detailed-operations');
+const detailedOperationsBody = document.getElementById('detailed-operations-body');
+const detailedEmpty = document.getElementById('detailed-empty');
+
 const mainTabButtons = Array.from(document.querySelectorAll('[data-main-tab]'));
 const mainTabPanels = Array.from(document.querySelectorAll('[data-main-panel]'));
 
+const AUTO_REFRESH_INTERVALS = new Set([20, 30, 60, 120, 300]);
+
 let activeUsername = '';
-let allOperations = [];
+let chartIdCounter = 0;
+
+let summaryOperations = [];
 let operationsBySymbol = new Map();
 let availableSymbols = [];
-let chartIdCounter = 0;
+let isSummaryLoading = false;
+
+let detailedOperations = [];
+let detailedFilters = { ...buildDefaultRequestFilters(), tipo: 'todas' };
+let detailLoadedOnce = false;
+let isDetailedLoading = false;
+
+let autoRefreshEnabled = false;
+let autoRefreshSeconds = 60;
+let autoRefreshTimerId = null;
+let lastSummaryRefreshTime = null;
+let toastNode = null;
+let toastTimeoutId = null;
 
 const integerNumberFormatter = new Intl.NumberFormat('es-AR', {
   maximumFractionDigits: 0
@@ -49,32 +79,101 @@ function formatTimeISO(date) {
   return `${hh}:${mm}:${ss}`;
 }
 
+function isBusinessDay(date) {
+  const day = date.getDay();
+  return day >= 1 && day <= 5;
+}
+
+function getPreviousBusinessDay(referenceDate = nowLocal()) {
+  const cursor = new Date(referenceDate.getTime());
+  cursor.setHours(0, 0, 0, 0);
+
+  do {
+    cursor.setDate(cursor.getDate() - 1);
+  } while (!isBusinessDay(cursor));
+
+  return cursor;
+}
+
 function buildDefaultRequestFilters() {
   const now = nowLocal();
-  const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+  const previousBusinessDay = getPreviousBusinessDay(now);
 
   return {
-    fechaDesde: formatDateISO(yesterday),
+    fechaDesde: formatDateISO(previousBusinessDay),
     fechaHasta: formatDateISO(now),
     horaDesde: '00:00:00',
     horaHasta: formatTimeISO(now)
   };
 }
 
-function formatRangeText(filters) {
-  return `${filters.fechaDesde} ${filters.horaDesde} -> ${filters.fechaHasta} ${filters.horaHasta}`;
+function ensureToastNode() {
+  let styleNode = document.getElementById('broker-toast-style');
+  if (!styleNode) {
+    styleNode = document.createElement('style');
+    styleNode.id = 'broker-toast-style';
+    styleNode.textContent = `
+      .broker-toast {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 9999;
+        max-width: min(460px, calc(100vw - 24px));
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid #dbe3df;
+        background: #f6f8f7;
+        color: #2c3a3f;
+        font-size: 0.9rem;
+        box-shadow: 0 12px 28px rgba(29, 49, 42, 0.18);
+        opacity: 0;
+        transform: translateY(8px);
+        pointer-events: none;
+        transition: opacity 120ms ease, transform 120ms ease;
+      }
+      .broker-toast.show {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      .broker-toast.ok {
+        color: #1f6f53;
+        background: #e3f2eb;
+        border-color: #cde7db;
+      }
+      .broker-toast.error {
+        color: #8e2f3a;
+        background: #f9ecee;
+        border-color: #f2d4d8;
+      }
+    `;
+    document.head.appendChild(styleNode);
+  }
+
+  if (!toastNode) {
+    toastNode = document.createElement('div');
+    toastNode.className = 'broker-toast';
+    document.body.appendChild(toastNode);
+  }
+
+  return toastNode;
 }
 
-function setStatus(message, tone = 'neutral') {
-  statusText.textContent = message;
-  statusText.className = `status-text ${tone}`;
-}
+function setStatus(message, tone = 'neutral', options = {}) {
+  if (options.silent || !message) {
+    return;
+  }
 
-function setActionsEnabled(enabled) {
-  reloadButton.disabled = !enabled;
-  changeAccountButton.disabled = false;
-  const canAddChart = enabled && availableSymbols.length > 0;
-  addChartInitialButton.disabled = !canAddChart;
+  const node = ensureToastNode();
+  node.textContent = String(message);
+  node.className = `broker-toast ${tone}`;
+  node.classList.add('show');
+
+  if (toastTimeoutId !== null) {
+    clearTimeout(toastTimeoutId);
+  }
+  toastTimeoutId = setTimeout(() => {
+    node.classList.remove('show');
+  }, 2000);
 }
 
 function normalizeOperationType(value) {
@@ -145,19 +244,159 @@ function formatNumber(value) {
   return decimalNumberFormatter.format(rounded);
 }
 
+function formatMaybeNumeric(value) {
+  if (value === null || value === undefined || String(value).trim() === '') {
+    return '-';
+  }
+
+  const text = String(value).trim();
+  if (!/[0-9]/.test(text)) {
+    return text;
+  }
+
+  const parsed = parseOperationNumber(value);
+  const looksNumeric = /[0-9]+(?:[.,][0-9]+)?/.test(text);
+  if (!looksNumeric) {
+    return text;
+  }
+  return formatNumber(parsed);
+}
+
+function firstDefined(row, keys) {
+  for (const key of keys) {
+    if (row[key] !== undefined && row[key] !== null) {
+      return row[key];
+    }
+  }
+  return null;
+}
+
+function buildDateTimeFromParts(dateValue, timeValue) {
+  const d = safeText(dateValue, '');
+  const t = safeText(timeValue, '00:00:00');
+  if (!d) {
+    return null;
+  }
+  const normalizedTime = t.length === 5 ? `${t}:00` : t;
+  return new Date(`${d}T${normalizedTime}`);
+}
+
+function setDetailedFiltersInputs(filters) {
+  detailedDateFromInput.value = safeText(filters.fechaDesde, '');
+  detailedDateToInput.value = safeText(filters.fechaHasta, '');
+  detailedTimeFromInput.value = safeText(filters.horaDesde, '00:00:00');
+  detailedTimeToInput.value = safeText(filters.horaHasta, '00:00:00');
+  detailedTypeSelect.value = sanitizeDetailedTypeFilter(filters.tipo);
+}
+
+function sanitizeDetailedTypeFilter(value) {
+  const normalized = safeText(value, 'todas').toLowerCase();
+  if (normalized === 'compra' || normalized === 'venta') {
+    return normalized;
+  }
+  return 'todas';
+}
+
+function readDetailedFiltersFromInputs() {
+  return {
+    fechaDesde: safeText(detailedDateFromInput.value, ''),
+    fechaHasta: safeText(detailedDateToInput.value, ''),
+    horaDesde: safeText(detailedTimeFromInput.value, '00:00:00'),
+    horaHasta: safeText(detailedTimeToInput.value, '00:00:00'),
+    tipo: sanitizeDetailedTypeFilter(detailedTypeSelect.value)
+  };
+}
+
+function validateFilters(filters) {
+  if (!filters.fechaDesde || !filters.fechaHasta) {
+    throw new Error('Debes completar fecha desde y fecha hasta.');
+  }
+
+  const from = buildDateTimeFromParts(filters.fechaDesde, filters.horaDesde);
+  const to = buildDateTimeFromParts(filters.fechaHasta, filters.horaHasta);
+  if (!from || !to || Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) {
+    throw new Error('Rango de fecha/hora invalido.');
+  }
+  if (from > to) {
+    throw new Error('fechaDesde/horaDesde no puede ser mayor a fechaHasta/horaHasta.');
+  }
+}
+
+function setMenuOpen(isOpen) {
+  topMenu.hidden = !isOpen;
+  menuButton.setAttribute('aria-expanded', String(isOpen));
+}
+
+function formatRefreshClock(date) {
+  if (!(date instanceof Date) || Number.isNaN(date.getTime())) {
+    return '--:--:--';
+  }
+  return date.toLocaleTimeString('es-AR', { hour12: false });
+}
+
+function updateLastRefreshText() {
+  lastRefreshText.textContent = `Ult refresh: ${formatRefreshClock(lastSummaryRefreshTime)}`;
+}
+
+function updateAutoRefreshPill() {
+  const enabled = autoRefreshEnabled && Boolean(activeUsername);
+  autoRefreshLight.classList.toggle('on', enabled);
+  autoRefreshLight.classList.toggle('off', !enabled);
+
+  if (!enabled) {
+    autoRefreshLabel.textContent = 'AR: OFF';
+    return;
+  }
+  autoRefreshLabel.textContent = `AR: ${autoRefreshSeconds}s`;
+}
+
+function clearAutoRefreshTimer() {
+  if (autoRefreshTimerId !== null) {
+    clearInterval(autoRefreshTimerId);
+    autoRefreshTimerId = null;
+  }
+}
+
+function configureAutoRefresh() {
+  clearAutoRefreshTimer();
+  if (!autoRefreshEnabled || !activeUsername) {
+    updateAutoRefreshPill();
+    return;
+  }
+
+  autoRefreshTimerId = setInterval(() => {
+    loadSummaryOperations({ source: 'auto' });
+  }, autoRefreshSeconds * 1000);
+
+  updateAutoRefreshPill();
+}
+
+function setControlsEnabled(enabled) {
+  const hasActiveUser = enabled && Boolean(activeUsername);
+
+  menuButton.disabled = !hasActiveUser;
+  reloadButton.disabled = !hasActiveUser || isSummaryLoading;
+  autoRefreshToggle.disabled = !hasActiveUser;
+  autoRefreshIntervalSelect.disabled = !hasActiveUser;
+  detailedTypeSelect.disabled = !hasActiveUser || isDetailedLoading;
+  detailedLoadButton.disabled = !hasActiveUser || isDetailedLoading;
+
+  const canAddChart = hasActiveUser && availableSymbols.length > 0;
+  addChartInitialButton.disabled = !canAddChart;
+
+  if (!hasActiveUser) {
+    autoRefreshEnabled = false;
+    autoRefreshToggle.checked = false;
+    clearAutoRefreshTimer();
+    updateAutoRefreshPill();
+  }
+}
+
 function clearCharts() {
   const cards = chartsGrid.querySelectorAll('.chart-card');
   for (const card of cards) {
     card.remove();
   }
-}
-
-function setDataSummary(message) {
-  dataSummary.textContent = message;
-}
-
-function updateAddEntryVisibility() {
-  addChartInitialButton.disabled = availableSymbols.length === 0 || !activeUsername;
 }
 
 function groupOperationsBySymbol(operations) {
@@ -190,11 +429,71 @@ function resolveChartStatusGroup(row) {
   return null;
 }
 
+function parseOperationDate(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return value;
+  }
+
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const parsedTimestamp = new Date(value);
+    if (!Number.isNaN(parsedTimestamp.getTime())) {
+      return parsedTimestamp;
+    }
+  }
+
+  const raw = safeText(value, '');
+  if (!raw) {
+    return null;
+  }
+
+  const text = raw.trim();
+  if (!text) {
+    return null;
+  }
+
+  const normalizedIso = text.includes(' ') ? text.replace(' ', 'T') : text;
+  const parsedIso = new Date(normalizedIso);
+  if (!Number.isNaN(parsedIso.getTime())) {
+    return parsedIso;
+  }
+
+  const ddmmyyyyMatch = text.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+  if (!ddmmyyyyMatch) {
+    return null;
+  }
+
+  const day = Number(ddmmyyyyMatch[1]);
+  const month = Number(ddmmyyyyMatch[2]) - 1;
+  const year = Number(ddmmyyyyMatch[3]);
+  const hour = Number(ddmmyyyyMatch[4] || '0');
+  const minute = Number(ddmmyyyyMatch[5] || '0');
+  const second = Number(ddmmyyyyMatch[6] || '0');
+
+  const parsedLocal = new Date(year, month, day, hour, minute, second);
+  if (Number.isNaN(parsedLocal.getTime())) {
+    return null;
+  }
+  return parsedLocal;
+}
+
+function resolveOperationDateKey(row) {
+  const candidateDate = firstDefined(row, ['fechaOperada', 'fechaOrden', 'fecha']);
+  const parsed = parseOperationDate(candidateDate);
+  if (!parsed) {
+    return null;
+  }
+  return formatDateISO(parsed);
+}
+
 function calculateTotalsByStatus(symbol, mode) {
   const rows = operationsBySymbol.get(symbol) || [];
+  const now = nowLocal();
+  const todayKey = formatDateISO(now);
+  const previousBusinessDayKey = formatDateISO(getPreviousBusinessDay(now));
 
   const totals = {
-    terminadas: { cantidadOperada: 0, montoOperado: 0 },
+    hoy: { cantidadOperada: 0, montoOperado: 0 },
+    diaPrevio: { cantidadOperada: 0, montoOperado: 0 },
     pendientes: { cantidad: 0, monto: 0, precioSum: 0, precioCount: 0 }
   };
 
@@ -221,8 +520,17 @@ function calculateTotalsByStatus(symbol, mode) {
       continue;
     }
 
-    totals.terminadas.cantidadOperada += parseOperationNumber(row.cantidadOperada);
-    totals.terminadas.montoOperado += parseOperationNumber(row.montoOperado);
+    const operationDateKey = resolveOperationDateKey(row);
+    if (operationDateKey === todayKey) {
+      totals.hoy.cantidadOperada += parseOperationNumber(row.cantidadOperada);
+      totals.hoy.montoOperado += parseOperationNumber(row.montoOperado);
+      continue;
+    }
+
+    if (operationDateKey === previousBusinessDayKey) {
+      totals.diaPrevio.cantidadOperada += parseOperationNumber(row.cantidadOperada);
+      totals.diaPrevio.montoOperado += parseOperationNumber(row.montoOperado);
+    }
   }
 
   return totals;
@@ -272,29 +580,51 @@ function renderChartContent(container, symbol, mode) {
   }
 
   const totals = calculateTotalsByStatus(symbol, mode);
-  const ppcOrPpv =
-    totals.terminadas.cantidadOperada !== 0
-      ? totals.terminadas.montoOperado / totals.terminadas.cantidadOperada
+  const todayPpcOrPpv =
+    totals.hoy.cantidadOperada !== 0
+      ? totals.hoy.montoOperado / totals.hoy.cantidadOperada
       : 0;
-  const pendingMontoPromedio =
+  const previousPpcOrPpv =
+    totals.diaPrevio.cantidadOperada !== 0
+      ? totals.diaPrevio.montoOperado / totals.diaPrevio.cantidadOperada
+      : 0;
+  const pendingPrecioPromedio =
     totals.pendientes.precioCount > 0 ? totals.pendientes.precioSum / totals.pendientes.precioCount : 0;
+  const priceLabel = mode === 'compra' ? 'PPC' : 'PPV';
 
   const groups = document.createElement('div');
   groups.className = 'summary-groups';
 
-  const finishedGroup = document.createElement('section');
-  finishedGroup.className = 'summary-group';
-  const finishedTitle = document.createElement('p');
-  finishedTitle.className = 'summary-group-title';
-  finishedTitle.textContent = 'Terminadas';
-  finishedGroup.appendChild(finishedTitle);
-  finishedGroup.appendChild(
+  const todayGroup = document.createElement('section');
+  todayGroup.className = 'summary-group';
+  const todayTitle = document.createElement('p');
+  todayTitle.className = 'summary-group-title';
+  todayTitle.textContent = 'Hoy';
+  todayGroup.appendChild(todayTitle);
+  todayGroup.appendChild(
     buildSummaryTable(
-      ['Cantidad Operada', 'Monto Operado', mode === 'compra' ? 'PPC' : 'PPV'],
+      ['Cantidad Operada', 'Monto Operado', priceLabel],
       [
-        formatNumber(totals.terminadas.cantidadOperada),
-        formatNumber(totals.terminadas.montoOperado),
-        formatNumber(ppcOrPpv)
+        formatNumber(totals.hoy.cantidadOperada),
+        formatNumber(totals.hoy.montoOperado),
+        formatNumber(todayPpcOrPpv)
+      ]
+    )
+  );
+
+  const previousGroup = document.createElement('section');
+  previousGroup.className = 'summary-group';
+  const previousTitle = document.createElement('p');
+  previousTitle.className = 'summary-group-title';
+  previousTitle.textContent = 'Dia Previo';
+  previousGroup.appendChild(previousTitle);
+  previousGroup.appendChild(
+    buildSummaryTable(
+      ['Cantidad Operada', 'Monto Operado', priceLabel],
+      [
+        formatNumber(totals.diaPrevio.cantidadOperada),
+        formatNumber(totals.diaPrevio.montoOperado),
+        formatNumber(previousPpcOrPpv)
       ]
     )
   );
@@ -311,12 +641,13 @@ function renderChartContent(container, symbol, mode) {
       [
         formatNumber(totals.pendientes.cantidad),
         formatNumber(totals.pendientes.monto),
-        formatNumber(pendingMontoPromedio)
+        formatNumber(pendingPrecioPromedio)
       ]
     )
   );
 
-  groups.appendChild(finishedGroup);
+  groups.appendChild(todayGroup);
+  groups.appendChild(previousGroup);
   groups.appendChild(pendingGroup);
   container.appendChild(groups);
 }
@@ -421,13 +752,13 @@ function createChartCard(defaultSymbol = '') {
   }
 
   refreshCard();
-  updateAddEntryVisibility();
+  setControlsEnabled(Boolean(activeUsername));
 }
 
 function syncExistingCardsWithNewData() {
   const cards = Array.from(chartsGrid.querySelectorAll('.chart-card'));
   if (cards.length === 0) {
-    updateAddEntryVisibility();
+    setControlsEnabled(Boolean(activeUsername));
     return;
   }
 
@@ -448,7 +779,168 @@ function syncExistingCardsWithNewData() {
     }
   }
 
-  updateAddEntryVisibility();
+  setControlsEnabled(Boolean(activeUsername));
+}
+
+function resetSummaryData() {
+  summaryOperations = [];
+  operationsBySymbol = new Map();
+  availableSymbols = [];
+  clearCharts();
+}
+
+function appendDetailedCell(row, value) {
+  const td = document.createElement('td');
+  td.textContent = safeText(value);
+  row.appendChild(td);
+}
+
+function filterDetailedOperationsByType(operations, typeFilter) {
+  const selectedType = sanitizeDetailedTypeFilter(typeFilter);
+  if (selectedType === 'todas') {
+    return operations.slice();
+  }
+
+  return operations.filter((operation) => {
+    const normalizedType = operation.tipoFiltro || normalizeOperationType(operation.tipo);
+    return normalizedType === selectedType;
+  });
+}
+
+function renderDetailedOperationsTable(operations) {
+  while (detailedOperationsBody.firstChild) {
+    detailedOperationsBody.removeChild(detailedOperationsBody.firstChild);
+  }
+
+  for (const operation of operations) {
+    const row = document.createElement('tr');
+
+    appendDetailedCell(row, firstDefined(operation, ['fechaOrden', 'fecha']));
+    appendDetailedCell(row, operation.tipo);
+    appendDetailedCell(row, operation.estado);
+    appendDetailedCell(row, operation.mercado);
+    appendDetailedCell(row, operation.simbolo);
+    appendDetailedCell(row, formatMaybeNumeric(operation.cantidad));
+    appendDetailedCell(row, formatMaybeNumeric(operation.monto));
+    appendDetailedCell(row, formatMaybeNumeric(operation.precio));
+    appendDetailedCell(row, formatMaybeNumeric(operation.cantidadOperada));
+    appendDetailedCell(row, formatMaybeNumeric(firstDefined(operation, ['precioOperado', 'precioPromedio'])));
+    appendDetailedCell(row, formatMaybeNumeric(operation.montoOperado));
+
+    detailedOperationsBody.appendChild(row);
+  }
+
+  detailedEmpty.hidden = operations.length > 0;
+  if (operations.length === 0) {
+    detailedEmpty.textContent = 'No hay operaciones para el rango seleccionado.';
+  }
+}
+
+function resetDetailedData(message = 'Aun no hay datos cargados para este filtro.') {
+  detailedOperations = [];
+  detailLoadedOnce = false;
+  while (detailedOperationsBody.firstChild) {
+    detailedOperationsBody.removeChild(detailedOperationsBody.firstChild);
+  }
+  detailedEmpty.hidden = false;
+  detailedEmpty.textContent = message;
+}
+
+function renderDetailedOperationsFromCurrentState() {
+  const filteredOperations = filterDetailedOperationsByType(detailedOperations, detailedFilters.tipo);
+  renderDetailedOperationsTable(filteredOperations);
+  return filteredOperations.length;
+}
+
+async function loadDetailedOperations() {
+  if (!activeUsername || isDetailedLoading) {
+    return;
+  }
+
+  try {
+    const nextFilters = readDetailedFiltersFromInputs();
+    validateFilters(nextFilters);
+    detailedFilters = nextFilters;
+  } catch (error) {
+    setStatus(error.message, 'error');
+    return;
+  }
+
+  isDetailedLoading = true;
+  setControlsEnabled(true);
+  setStatus(`Consultando operaciones detalladas (${activeUsername})...`, 'neutral');
+
+  try {
+    const response = await window.apiBroker.getOperations(detailedFilters);
+
+    if (!Array.isArray(response.operaciones)) {
+      resetDetailedData('No se pudieron cargar operaciones detalladas.');
+      setStatus(response.mensaje || 'Error al consultar operaciones detalladas.', 'error');
+      return;
+    }
+
+    detailedOperations = response.operaciones;
+    detailLoadedOnce = true;
+    const visibleCount = renderDetailedOperationsFromCurrentState();
+    const selectedType = sanitizeDetailedTypeFilter(detailedFilters.tipo);
+    const typeDetail = selectedType === 'todas' ? 'todas' : selectedType;
+    setStatus(`Operaciones detalladas cargadas: ${visibleCount} (tipo: ${typeDetail}).`, 'ok');
+  } catch (error) {
+    resetDetailedData('Error al cargar operaciones detalladas.');
+    setStatus(error.message, 'error');
+  } finally {
+    isDetailedLoading = false;
+    setControlsEnabled(true);
+  }
+}
+
+async function loadSummaryOperations({ source = 'manual' } = {}) {
+  if (!activeUsername || isSummaryLoading) {
+    return;
+  }
+
+  isSummaryLoading = true;
+  setControlsEnabled(true);
+
+  if (source !== 'auto') {
+    setStatus(`Consultando resumen por simbolo (${activeUsername})...`, 'neutral');
+  }
+
+  const filters = buildDefaultRequestFilters();
+
+  try {
+    const response = await window.apiBroker.getOperations(filters);
+
+    if (!Array.isArray(response.operaciones)) {
+      resetSummaryData();
+      setControlsEnabled(true);
+      setStatus(response.mensaje || 'Error al consultar operaciones.', 'error');
+      return;
+    }
+
+    summaryOperations = response.operaciones;
+    operationsBySymbol = groupOperationsBySymbol(summaryOperations);
+    availableSymbols = Array.from(operationsBySymbol.keys()).sort((a, b) => a.localeCompare(b));
+    lastSummaryRefreshTime = nowLocal();
+    updateLastRefreshText();
+
+    if (!chartsGrid.querySelector('.chart-card')) {
+      setControlsEnabled(true);
+    } else {
+      syncExistingCardsWithNewData();
+    }
+
+    if (source !== 'auto') {
+      setStatus(`Resumen actualizado. Operaciones: ${summaryOperations.length}. Simbolos: ${availableSymbols.length}.`, 'ok');
+    }
+  } catch (error) {
+    resetSummaryData();
+    setControlsEnabled(true);
+    setStatus(error.message, 'error');
+  } finally {
+    isSummaryLoading = false;
+    setControlsEnabled(true);
+  }
 }
 
 function applyMainTab(tabId) {
@@ -458,6 +950,10 @@ function applyMainTab(tabId) {
 
   for (const panel of mainTabPanels) {
     panel.classList.toggle('active', panel.id === tabId);
+  }
+
+  if (tabId === 'tab-all-operations' && activeUsername && !detailLoadedOnce) {
+    loadDetailedOperations();
   }
 }
 
@@ -472,99 +968,128 @@ async function refreshActiveAccount({ reloadOnChange = false } = {}) {
   activeUsername = nextUsername;
 
   if (activeUsername) {
-    setActionsEnabled(true);
-    setStatus(`Cuenta activa: ${activeUsername}.`, 'ok');
+    setControlsEnabled(true);
+
+    if (changed) {
+      resetSummaryData();
+      resetDetailedData('Aun no hay datos cargados para este filtro.');
+      setDetailedFiltersInputs(detailedFilters);
+    }
 
     if (reloadOnChange && changed) {
-      await loadOperations();
+      await loadSummaryOperations({ source: 'manual' });
+    } else if (!summaryOperations.length && !isSummaryLoading) {
+      await loadSummaryOperations({ source: 'manual' });
+    } else if (changed) {
+      setStatus(`Cuenta activa: ${activeUsername}.`, 'ok');
     }
+
+    configureAutoRefresh();
     return;
   }
 
-  allOperations = [];
-  operationsBySymbol = new Map();
-  availableSymbols = [];
-  clearCharts();
-  updateAddEntryVisibility();
-  setActionsEnabled(false);
-  setDataSummary('No hay cuenta activa.');
-  setStatus('No hay cuenta activa. Usa "Cambiar Cuenta".', 'error');
+  resetSummaryData();
+  resetDetailedData('No hay cuenta activa.');
+  lastSummaryRefreshTime = null;
+  updateLastRefreshText();
+  setControlsEnabled(false);
+  setStatus('No hay cuenta activa.', 'error');
 }
 
-async function loadOperations() {
-  if (!activeUsername) {
-    setStatus('No hay cuenta activa. Usa "Cambiar Cuenta".', 'error');
+function handleAutoRefreshToggleChange() {
+  autoRefreshEnabled = autoRefreshToggle.checked;
+  configureAutoRefresh();
+
+  if (autoRefreshEnabled && activeUsername) {
+    setStatus(`Auto refresh activado (${autoRefreshSeconds}s).`, 'ok');
+    loadSummaryOperations({ source: 'manual' });
+  } else {
+    setStatus('Auto refresh desactivado.', 'neutral');
+  }
+}
+
+function handleAutoRefreshIntervalChange() {
+  const value = Number(autoRefreshIntervalSelect.value);
+  if (!AUTO_REFRESH_INTERVALS.has(value)) {
+    autoRefreshIntervalSelect.value = String(autoRefreshSeconds);
     return;
   }
 
-  reloadButton.disabled = true;
-  setStatus(`Consultando operaciones (${activeUsername})...`, 'neutral');
-
-  const filters = buildDefaultRequestFilters();
-  dataRangeText.textContent = formatRangeText(filters);
-
-  try {
-    const response = await window.apiBroker.getOperations(filters);
-
-    if (!Array.isArray(response.operaciones)) {
-      allOperations = [];
-      operationsBySymbol = new Map();
-      availableSymbols = [];
-      clearCharts();
-      updateAddEntryVisibility();
-      setDataSummary('No se pudieron cargar operaciones.');
-      setStatus(response.mensaje || 'Error al consultar operaciones.', 'error');
-      return;
-    }
-
-    allOperations = response.operaciones;
-    operationsBySymbol = groupOperationsBySymbol(allOperations);
-    availableSymbols = Array.from(operationsBySymbol.keys()).sort((a, b) => a.localeCompare(b));
-
-    setDataSummary(`Operaciones cargadas: ${allOperations.length}. Simbolos detectados: ${availableSymbols.length}.`);
-    setStatus(`Datos listos para ${availableSymbols.length} simbolos.`, 'ok');
-
-    if (!chartsGrid.querySelector('.chart-card')) {
-      updateAddEntryVisibility();
-    } else {
-      syncExistingCardsWithNewData();
-    }
-  } catch (error) {
-    allOperations = [];
-    operationsBySymbol = new Map();
-    availableSymbols = [];
-    clearCharts();
-    updateAddEntryVisibility();
-    setDataSummary('Error al cargar operaciones.');
-    setStatus(error.message, 'error');
-  } finally {
-    reloadButton.disabled = false;
+  autoRefreshSeconds = value;
+  configureAutoRefresh();
+  if (autoRefreshEnabled && activeUsername) {
+    setStatus(`Intervalo de auto refresh: ${autoRefreshSeconds}s.`, 'neutral');
   }
 }
 
-async function openLoginWindow() {
-  try {
-    await window.apiBroker.openLoginWindow();
-    setStatus('Ventana de login abierta.', 'neutral');
-  } catch (_error) {
-    setStatus('No se pudo abrir la ventana de login.', 'error');
+function handleDetailedTypeFilterChange() {
+  detailedFilters.tipo = sanitizeDetailedTypeFilter(detailedTypeSelect.value);
+  detailedTypeSelect.value = detailedFilters.tipo;
+
+  if (!detailLoadedOnce) {
+    return;
   }
+
+  const visibleCount = renderDetailedOperationsFromCurrentState();
+  setStatus(`Filtro de tipo aplicado: ${detailedFilters.tipo}. Operaciones: ${visibleCount}.`, 'neutral');
+}
+
+function handleMenuClickOutside(event) {
+  if (topMenu.hidden) {
+    return;
+  }
+
+  const target = event.target;
+  if (topMenu.contains(target) || menuButton.contains(target)) {
+    return;
+  }
+
+  setMenuOpen(false);
 }
 
 async function initialize() {
+  detailedFilters = { ...buildDefaultRequestFilters(), tipo: 'todas' };
+  setDetailedFiltersInputs(detailedFilters);
   applyMainTab('tab-symbols');
-  setActionsEnabled(false);
-  setDataSummary('Cargando operaciones...');
-  dataRangeText.textContent = '';
-  setStatus('Cargando cuenta activa...', 'neutral');
+  setControlsEnabled(false);
+  updateAutoRefreshPill();
+  updateLastRefreshText();
 
   try {
     await refreshActiveAccount();
-    await loadOperations();
   } catch (error) {
     setStatus(error.message, 'error');
   }
 }
+
+menuButton.addEventListener('click', () => {
+  setMenuOpen(topMenu.hidden);
+});
+
+reloadButton.addEventListener('click', () => {
+  setMenuOpen(false);
+  loadSummaryOperations({ source: 'manual' });
+});
+
+autoRefreshToggle.addEventListener('change', () => {
+  handleAutoRefreshToggleChange();
+});
+
+autoRefreshIntervalSelect.addEventListener('change', () => {
+  handleAutoRefreshIntervalChange();
+});
+
+detailedLoadButton.addEventListener('click', () => {
+  loadDetailedOperations();
+});
+
+detailedTypeSelect.addEventListener('change', () => {
+  handleDetailedTypeFilterChange();
+});
+
+addChartInitialButton.addEventListener('click', () => {
+  createChartCard();
+});
 
 for (const button of mainTabButtons) {
   button.addEventListener('click', () => {
@@ -572,20 +1097,16 @@ for (const button of mainTabButtons) {
   });
 }
 
-reloadButton.addEventListener('click', () => {
-  loadOperations();
-});
-
-changeAccountButton.addEventListener('click', () => {
-  openLoginWindow();
-});
-
-addChartInitialButton.addEventListener('click', () => {
-  createChartCard();
-});
-
 window.addEventListener('focus', () => {
   refreshActiveAccount({ reloadOnChange: true }).catch(() => {});
 });
+
+window.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape') {
+    setMenuOpen(false);
+  }
+});
+
+document.addEventListener('mousedown', handleMenuClickOutside);
 
 initialize();

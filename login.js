@@ -3,7 +3,60 @@ const addAccountButton = document.getElementById('btn-add-account');
 const savedUserSelect = document.getElementById('saved-user-select');
 const usernameInput = document.getElementById('username-input');
 const passwordInput = document.getElementById('password-input');
-const statusText = document.getElementById('status-text');
+
+let toastNode = null;
+let toastTimeoutId = null;
+
+function ensureToastNode() {
+  let styleNode = document.getElementById('broker-toast-style');
+  if (!styleNode) {
+    styleNode = document.createElement('style');
+    styleNode.id = 'broker-toast-style';
+    styleNode.textContent = `
+      .broker-toast {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        z-index: 9999;
+        max-width: min(420px, calc(100vw - 24px));
+        padding: 10px 12px;
+        border-radius: 10px;
+        border: 1px solid #dbe3df;
+        background: #f6f8f7;
+        color: #2c3a3f;
+        font-size: 0.9rem;
+        box-shadow: 0 12px 28px rgba(29, 49, 42, 0.18);
+        opacity: 0;
+        transform: translateY(8px);
+        pointer-events: none;
+        transition: opacity 120ms ease, transform 120ms ease;
+      }
+      .broker-toast.show {
+        opacity: 1;
+        transform: translateY(0);
+      }
+      .broker-toast.ok {
+        color: #1f6f53;
+        background: #e3f2eb;
+        border-color: #cde7db;
+      }
+      .broker-toast.error {
+        color: #8e2f3a;
+        background: #f9ecee;
+        border-color: #f2d4d8;
+      }
+    `;
+    document.head.appendChild(styleNode);
+  }
+
+  if (!toastNode) {
+    toastNode = document.createElement('div');
+    toastNode.className = 'broker-toast';
+    document.body.appendChild(toastNode);
+  }
+
+  return toastNode;
+}
 
 function safeText(value, fallback = '') {
   if (value === null || value === undefined) {
@@ -13,8 +66,21 @@ function safeText(value, fallback = '') {
 }
 
 function setStatus(message, tone = 'neutral') {
-  statusText.textContent = message;
-  statusText.className = `status-text ${tone}`;
+  if (!message) {
+    return;
+  }
+
+  const node = ensureToastNode();
+  node.textContent = String(message);
+  node.className = `broker-toast ${tone}`;
+  node.classList.add('show');
+
+  if (toastTimeoutId !== null) {
+    clearTimeout(toastTimeoutId);
+  }
+  toastTimeoutId = setTimeout(() => {
+    node.classList.remove('show');
+  }, 2000);
 }
 
 function setUserSelectOptions(accounts, activeUser) {
