@@ -1,6 +1,9 @@
 node_modules/
 __pycache__/
 *.pyc
+build/
+dist/
+*.spec
 
 # Local secrets (never commit)
 credentials.json

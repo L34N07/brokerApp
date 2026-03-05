@@ -1,20 +1,50 @@
-const { app, BrowserWindow, ipcMain } = require('electron');
+const { app, BrowserWindow, ipcMain, Menu } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 
-const PYTHON_BIN = process.env.PYTHON_BIN || 'python3';
-const PYTHON_SCRIPT = path.join(__dirname, 'script.py');
 let mainWindow = null;
 let loginWindow = null;
 let operationsWindow = null;
 
+function getBackendRuntime() {
+  if (app.isPackaged) {
+    const backendName = process.platform === 'win32' ? 'broker-backend.exe' : 'broker-backend';
+    return {
+      command: path.join(process.resourcesPath, 'backend', backendName),
+      args: []
+    };
+  }
+
+  const pythonBin = process.env.PYTHON_BIN || 'python3';
+  return {
+    command: pythonBin,
+    args: [path.join(__dirname, 'script.py')]
+  };
+}
+
+function lockDownWindow(win) {
+  win.setMenuBarVisibility(false);
+  win.removeMenu();
+  win.webContents.on('before-input-event', (event, input) => {
+    const key = String(input.key || '').toUpperCase();
+    const ctrlOrCmd = input.control || input.meta;
+    const devtoolsShortcut = ctrlOrCmd && input.shift && (key === 'I' || key === 'J' || key === 'C');
+    const reloadShortcut = key === 'F5' || (ctrlOrCmd && key === 'R');
+    const forceReloadShortcut = ctrlOrCmd && input.shift && key === 'R';
+    if (key === 'F12' || devtoolsShortcut || reloadShortcut || forceReloadShortcut) {
+      event.preventDefault();
+    }
+  });
+}
+
 function runPythonCommand(command, payload = null) {
   return new Promise((resolve, reject) => {
-    const args = [PYTHON_SCRIPT, command];
+    const backendRuntime = getBackendRuntime();
+    const args = [...backendRuntime.args, command];
     if (payload && typeof payload === 'object') {
       args.push(JSON.stringify(payload));
     }
-    const child = spawn(PYTHON_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(backendRuntime.command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
 
     let stdout = '';
     let stderr = '';
@@ -31,7 +61,7 @@ function runPythonCommand(command, payload = null) {
     });
 
     child.on('error', (error) => {
-      reject(new Error(`No se pudo iniciar Python (${PYTHON_BIN}): ${error.message}`));
+      reject(new Error(`No se pudo iniciar backend (${backendRuntime.command}): ${error.message}`));
     });
 
     child.on('close', (code) => {
@@ -78,6 +108,7 @@ function createMainWindow() {
     }
   });
 
+  lockDownWindow(mainWindow);
   mainWindow.loadFile('index.html');
   mainWindow.on('closed', () => {
     mainWindow = null;
@@ -103,6 +134,7 @@ function createLoginWindow() {
     }
   });
 
+  lockDownWindow(loginWindow);
   loginWindow.loadFile('login.html');
   loginWindow.on('closed', () => {
     loginWindow = null;
@@ -126,6 +158,7 @@ function createOperationsWindow() {
     }
   });
 
+  lockDownWindow(operationsWindow);
   operationsWindow.loadFile('operaciones.html');
   operationsWindow.on('closed', () => {
     operationsWindow = null;
@@ -228,6 +261,7 @@ ipcMain.handle('broker:select-account', async (_event, payload) => {
 });
 
 app.whenReady().then(() => {
+  Menu.setApplicationMenu(null);
   createLoginWindow();
 });
 
