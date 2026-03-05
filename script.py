@@ -16,8 +16,22 @@ DEFAULT_BEARER_EXPIRATION_SECONDS = int(os.getenv("IOL_DEFAULT_BEARER_EXPIRATION
 MAX_STORED_ACCOUNTS = int(os.getenv("IOL_MAX_STORED_ACCOUNTS", "2"))
 
 PROJECT_DIR = Path(__file__).resolve().parent
-TOKEN_FILE = PROJECT_DIR / "token.json"
-CREDENTIALS_FILE = PROJECT_DIR / "credentials.json"
+
+
+def get_data_dir():
+    configured = os.getenv("BROKERAPP_DATA_DIR")
+    if configured:
+        return Path(configured).expanduser()
+
+    if getattr(sys, "frozen", False):
+        return Path.home() / ".brokerapp"
+
+    return PROJECT_DIR
+
+
+DATA_DIR = get_data_dir()
+TOKEN_FILE = DATA_DIR / "token.json"
+CREDENTIALS_FILE = DATA_DIR / "credentials.json"
 
 
 def emit(payload):
@@ -34,6 +48,7 @@ def load_json_file(path):
 
 
 def save_json_file(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
     try:

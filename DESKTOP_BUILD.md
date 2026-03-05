@@ -57,3 +57,8 @@ npm run build:desktop:win
 Output installer:
 
 - `dist\BrokerApp Setup <version>.exe` (NSIS installer)
+
+Runtime data location on Windows:
+
+- `%APPDATA%\BrokerApp\token.json`
+- `%APPDATA%\BrokerApp\credentials.json`

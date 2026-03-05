@@ -41,10 +41,18 @@ function runPythonCommand(command, payload = null) {
   return new Promise((resolve, reject) => {
     const backendRuntime = getBackendRuntime();
     const args = [...backendRuntime.args, command];
+    const userDataDir = app.getPath('userData');
+    const backendEnv = {
+      ...process.env,
+      BROKERAPP_DATA_DIR: userDataDir
+    };
     if (payload && typeof payload === 'object') {
       args.push(JSON.stringify(payload));
     }
-    const child = spawn(backendRuntime.command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const child = spawn(backendRuntime.command, args, {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: backendEnv
+    });
 
     let stdout = '';
     let stderr = '';
