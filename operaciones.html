@@ -325,23 +325,37 @@
     }
 
     .chart-control {
-      display: grid;
-      gap: 5px;
+      display: flex;
+      align-items: center;
+      gap: 0;
     }
 
     .chart-control label {
-      font-size: 0.82rem;
-      color: #49635b;
-      font-weight: 600;
+      height: 36px;
+      padding: 0 10px;
+      border: 1px solid #cedbd5;
+      border-right: 0;
+      border-radius: 10px 0 0 10px;
+      background: #eef6f2;
+      font-size: 0.72rem;
+      color: #5d6f69;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      display: inline-flex;
+      align-items: center;
     }
 
     .symbol-select {
       border: 1px solid #cedbd5;
-      border-radius: 10px;
+      border-radius: 0 10px 10px 0;
       padding: 8px 10px;
-      background: #fbfdfc;
-      color: var(--text);
-      font-size: 0.9rem;
+      background: #ffffff;
+      color: #174f3b;
+      font-size: 0.95rem;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      min-width: 150px;
     }
 
     .mode-tabs {
@@ -364,13 +378,13 @@
     .mode-tab[data-mode="compra"] {
       border-color: #9bcfb8;
       background: #dff3e8;
-      color: #0f5a3e;
+      color: #dff3e8;
     }
 
     .mode-tab[data-mode="venta"] {
       border-color: #fae1e4;
       background: #fff3f5;
-      color: #833843;
+      color: #fff3f5;
     }
 
     .mode-tab.active[data-mode="compra"] {
@@ -386,12 +400,12 @@
     }
 
     .chart-content {
-      padding: 10px;
+      padding: 8px;
     }
 
     .summary-groups {
       display: grid;
-      gap: 12px;
+      gap: 6px;
     }
 
     .summary-group {
@@ -413,27 +427,46 @@
     .summary-table {
       width: 100%;
       border-collapse: collapse;
-      table-layout: fixed;
-      font-size: 0.9rem;
+      table-layout: auto;
+      font-size: 0.86rem;
     }
 
     .summary-table th,
     .summary-table td {
-      width: 33.333%;
       border-bottom: 1px solid #edf2ef;
-      text-align: left;
-      padding: 8px 6px;
+      padding: 6px 6px;
+      text-align: right;
     }
 
     .summary-table thead th {
-      background: #f8fbf9;
-      color: #49635b;
-      font-weight: 700;
+      background: #fafcfb;
+      color: #7a8a84;
+      font-weight: 600;
+      font-size: 0.72rem;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
       text-align: right;
     }
 
-    .summary-table tbody td {
-      text-align: right;
+    .summary-table th:first-child,
+    .summary-table td:first-child {
+      text-align: left;
+      white-space: nowrap;
+    }
+
+    .summary-table tbody td:first-child {
+      color: #6a7974;
+      font-size: 0.76rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+    }
+
+    .summary-table tbody td:not(:first-child) {
+      color: #1f2e33;
+      font-size: 1rem;
+      font-weight: 800;
+      font-variant-numeric: tabular-nums;
     }
 
     .filters-card {

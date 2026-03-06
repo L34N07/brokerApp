@@ -553,7 +553,7 @@ function buildValueRow(values) {
   return row;
 }
 
-function buildSummaryTable(headers, values) {
+function buildSummaryTable(headers, rows) {
   const table = document.createElement('table');
   table.className = 'summary-table';
 
@@ -568,7 +568,9 @@ function buildSummaryTable(headers, values) {
   table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
-  tbody.appendChild(buildValueRow(values));
+  for (const rowValues of rows) {
+    tbody.appendChild(buildValueRow(rowValues));
+  }
   table.appendChild(tbody);
 
   return table;
@@ -595,60 +597,31 @@ function renderChartContent(container, symbol, mode) {
   const groups = document.createElement('div');
   groups.className = 'summary-groups';
 
-  const todayGroup = document.createElement('section');
-  todayGroup.className = 'summary-group';
-  const todayTitle = document.createElement('p');
-  todayTitle.className = 'summary-group-title';
-  todayTitle.textContent = 'Hoy';
-  todayGroup.appendChild(todayTitle);
-  todayGroup.appendChild(
-    buildSummaryTable(
-      ['Cantidad Operada', 'Monto Operado', priceLabel],
+  const compactSummaryTable = buildSummaryTable(
+    ['Periodo', 'Cant', 'Monto', priceLabel],
+    [
       [
+        'Hoy',
         formatNumber(totals.hoy.cantidadOperada),
         formatNumber(totals.hoy.montoOperado),
         formatNumber(todayPpcOrPpv)
-      ]
-    )
-  );
-
-  const previousGroup = document.createElement('section');
-  previousGroup.className = 'summary-group';
-  const previousTitle = document.createElement('p');
-  previousTitle.className = 'summary-group-title';
-  previousTitle.textContent = 'Dia Previo';
-  previousGroup.appendChild(previousTitle);
-  previousGroup.appendChild(
-    buildSummaryTable(
-      ['Cantidad Operada', 'Monto Operado', priceLabel],
+      ],
       [
+        'Dia Previo',
         formatNumber(totals.diaPrevio.cantidadOperada),
         formatNumber(totals.diaPrevio.montoOperado),
         formatNumber(previousPpcOrPpv)
-      ]
-    )
-  );
-
-  const pendingGroup = document.createElement('section');
-  pendingGroup.className = 'summary-group';
-  const pendingTitle = document.createElement('p');
-  pendingTitle.className = 'summary-group-title';
-  pendingTitle.textContent = 'Pendientes/En Proceso';
-  pendingGroup.appendChild(pendingTitle);
-  pendingGroup.appendChild(
-    buildSummaryTable(
-      ['Cantidad', 'Monto', 'Precio Promedio'],
+      ],
       [
+        'Pendientes',
         formatNumber(totals.pendientes.cantidad),
         formatNumber(totals.pendientes.monto),
         formatNumber(pendingPrecioPromedio)
       ]
-    )
+    ]
   );
 
-  groups.appendChild(todayGroup);
-  groups.appendChild(previousGroup);
-  groups.appendChild(pendingGroup);
+  groups.appendChild(compactSummaryTable);
   container.appendChild(groups);
 }
 
