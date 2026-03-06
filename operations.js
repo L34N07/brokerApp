@@ -42,6 +42,7 @@ let isDetailedLoading = false;
 let autoRefreshEnabled = false;
 let autoRefreshSeconds = 60;
 let autoRefreshTimerId = null;
+let autoRefreshTimerSignature = '';
 let lastSummaryRefreshTime = null;
 let toastNode = null;
 let toastTimeoutId = null;
@@ -351,6 +352,12 @@ function updateLastRefreshText() {
   lastRefreshText.textContent = `Ult refresh: ${formatRefreshClock(lastSummaryRefreshTime)}`;
 }
 
+function buildAutoRefreshStatusMessage({ refreshedAt, operationsCount, symbolsCount, tokenSource }) {
+  const refreshClock = formatRefreshClock(refreshedAt);
+  const sourceDetail = safeText(tokenSource, 'desconocido');
+  return `Resumen actualizado. Operaciones: ${operationsCount}. Simbolos: ${symbolsCount}. Auto refresh: ${refreshClock}. Token: ${sourceDetail}.`;
+}
+
 function updateAutoRefreshPill() {
   const enabled = autoRefreshEnabled && Boolean(activeUsername);
   autoRefreshLight.classList.toggle('on', enabled);
@@ -368,15 +375,31 @@ function clearAutoRefreshTimer() {
     clearInterval(autoRefreshTimerId);
     autoRefreshTimerId = null;
   }
+  autoRefreshTimerSignature = '';
+}
+
+function buildAutoRefreshTimerSignature() {
+  if (!autoRefreshEnabled || !activeUsername) {
+    return '';
+  }
+  return `${activeUsername}::${autoRefreshSeconds}`;
 }
 
 function configureAutoRefresh() {
-  clearAutoRefreshTimer();
-  if (!autoRefreshEnabled || !activeUsername) {
+  const nextSignature = buildAutoRefreshTimerSignature();
+  if (!nextSignature) {
+    clearAutoRefreshTimer();
     updateAutoRefreshPill();
     return;
   }
 
+  if (autoRefreshTimerId !== null && autoRefreshTimerSignature === nextSignature) {
+    updateAutoRefreshPill();
+    return;
+  }
+
+  clearAutoRefreshTimer();
+  autoRefreshTimerSignature = nextSignature;
   autoRefreshTimerId = setInterval(() => {
     loadSummaryOperations({ source: 'auto' });
   }, autoRefreshSeconds * 1000);
@@ -678,6 +701,13 @@ function createChartCard(defaultSymbol = '') {
   const control = document.createElement('div');
   control.className = 'chart-control';
 
+  const closeButton = document.createElement('button');
+  closeButton.className = 'chart-close-btn';
+  closeButton.type = 'button';
+  closeButton.setAttribute('aria-label', 'Quitar tarjeta de resumen');
+  closeButton.title = 'Quitar tarjeta';
+  closeButton.textContent = '×';
+
   const label = document.createElement('label');
   label.textContent = 'Simbolo';
   label.setAttribute('for', `chart-symbol-${chartIdCounter}`);
@@ -690,6 +720,7 @@ function createChartCard(defaultSymbol = '') {
   control.appendChild(label);
   control.appendChild(symbolSelect);
   head.appendChild(control);
+  head.appendChild(closeButton);
 
   const modeTabs = document.createElement('div');
   modeTabs.className = 'mode-tabs';
@@ -739,6 +770,11 @@ function createChartCard(defaultSymbol = '') {
       refreshCard();
     });
   }
+
+  closeButton.addEventListener('click', () => {
+    card.remove();
+    setControlsEnabled(Boolean(activeUsername));
+  });
 
   refreshCard();
   setControlsEnabled(Boolean(activeUsername));
@@ -935,7 +971,17 @@ async function loadSummaryOperations({ source = 'manual' } = {}) {
       syncExistingCardsWithNewData();
     }
 
-    if (source !== 'auto') {
+    if (source === 'auto') {
+      setStatus(
+        buildAutoRefreshStatusMessage({
+          refreshedAt: lastSummaryRefreshTime,
+          operationsCount: summaryOperations.length,
+          symbolsCount: availableSymbols.length,
+          tokenSource: response.token_source
+        }),
+        'ok'
+      );
+    } else {
       setStatus(`Resumen actualizado. Operaciones: ${summaryOperations.length}. Simbolos: ${availableSymbols.length}.`, 'ok');
     }
   } catch (error) {

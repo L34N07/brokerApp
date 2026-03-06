@@ -322,12 +322,18 @@
       padding: 10px;
       border-bottom: 1px solid var(--border);
       background: #f8fbf9;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
     }
 
     .chart-control {
       display: flex;
       align-items: center;
       gap: 0;
+      min-width: 0;
+      flex: 1;
     }
 
     .chart-control label {
@@ -356,6 +362,29 @@
       font-weight: 800;
       letter-spacing: 0.02em;
       min-width: 150px;
+    }
+
+    .chart-close-btn {
+      width: 30px;
+      height: 30px;
+      border: 1px solid #d9b8bf;
+      border-radius: 999px;
+      background: #fff3f5;
+      color: #9f3444;
+      font-size: 1rem;
+      line-height: 1;
+      font-weight: 700;
+      cursor: pointer;
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 0;
+    }
+
+    .chart-close-btn:hover {
+      background: #fbe8ec;
+      border-color: #cf8e9a;
     }
 
     .mode-tabs {
