@@ -643,7 +643,7 @@ def normalize_operation_state(estado):
         return "canceladas"
     if "terminad" in value:
         return "terminadas"
-    if "pend" in value or "proceso" in value:
+    if "pend" in value or "proceso" in value or "iniciad" in value:
         return "pendientes"
     return "otras"
 

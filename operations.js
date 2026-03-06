@@ -197,7 +197,7 @@ function normalizeOperationStatus(value) {
   if (normalized.includes('terminad')) {
     return 'terminadas';
   }
-  if (normalized.includes('pend') || normalized.includes('proceso')) {
+  if (normalized.includes('pend') || normalized.includes('proceso') || normalized.includes('iniciad')) {
     return 'pendientes';
   }
   return 'otras';
@@ -462,7 +462,7 @@ function resolveChartStatusGroup(row) {
   }
 
   const rawStatus = safeText(row.estado, '').toLowerCase();
-  if (rawStatus.includes('proceso')) {
+  if (rawStatus.includes('proceso') || rawStatus.includes('iniciad')) {
     return 'pendientes';
   }
   return null;

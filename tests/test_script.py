@@ -304,6 +304,7 @@ class ScriptTokenTests(unittest.TestCase):
         self.assertEqual(script.normalize_operation_state("terminada"), "terminadas")
         self.assertEqual(script.normalize_operation_state("pendiente"), "pendientes")
         self.assertEqual(script.normalize_operation_state("en_proceso"), "pendientes")
+        self.assertEqual(script.normalize_operation_state("iniciada"), "pendientes")
 
 
 if __name__ == "__main__":
