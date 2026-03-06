@@ -105,10 +105,12 @@ function createMainWindow() {
   }
 
   mainWindow = new BrowserWindow({
-    width: 1180,
-    height: 840,
-    minWidth: 980,
-    minHeight: 700,
+    x: 0,
+    y: 0,
+    width: 790,
+    height: 560,
+    minWidth: 700,
+    minHeight: 500,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -131,6 +133,8 @@ function createLoginWindow() {
   }
 
   loginWindow = new BrowserWindow({
+    x: 0,
+    y: 0,
     width: 760,
     height: 620,
     minWidth: 620,
@@ -157,6 +161,8 @@ function createOperationsWindow() {
   }
 
   operationsWindow = new BrowserWindow({
+    x: 0,
+    y: 0,
     width: 1280,
     height: 860,
     webPreferences: {
@@ -168,6 +174,12 @@ function createOperationsWindow() {
 
   lockDownWindow(operationsWindow);
   operationsWindow.loadFile('operaciones.html');
+  operationsWindow.once('ready-to-show', () => {
+    if (!operationsWindow || operationsWindow.isDestroyed()) {
+      return;
+    }
+    operationsWindow.maximize();
+  });
   operationsWindow.on('closed', () => {
     operationsWindow = null;
   });
@@ -227,6 +239,24 @@ ipcMain.handle('broker:open-login-window', () => {
   return { estado: 'ok' };
 });
 
+ipcMain.handle('broker:logout', async () => {
+  try {
+    const response = await runPythonCommand('logout');
+    if (response.estado === 'ok') {
+      if (operationsWindow && !operationsWindow.isDestroyed()) {
+        operationsWindow.close();
+      }
+      createLoginWindow();
+    }
+    return response;
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
 ipcMain.handle('broker:activate-session', () => {
   createMainWindow();
   if (loginWindow && !loginWindow.isDestroyed()) {
@@ -260,6 +290,17 @@ ipcMain.handle('broker:login', async (_event, payload) => {
 ipcMain.handle('broker:select-account', async (_event, payload) => {
   try {
     return await runPythonCommand('select-account', payload || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
+ipcMain.handle('broker:delete-account', async (_event, payload) => {
+  try {
+    return await runPythonCommand('delete-account', payload || {});
   } catch (error) {
     return {
       estado: 'error',

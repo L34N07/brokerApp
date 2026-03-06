@@ -187,9 +187,73 @@ class ScriptTokenTests(unittest.TestCase):
 
     def test_normalize_credentials_store_supports_legacy_payload(self):
         store = script.normalize_credentials_store({"username": "u1", "password": "p1"})
-        self.assertEqual(store["active_username"], "u1")
+        self.assertIsNone(store["active_username"])
         self.assertEqual(len(store["accounts"]), 1)
         self.assertEqual(store["accounts"][0]["username"], "u1")
+
+    @patch("script.save_token_store")
+    @patch("script.save_credentials_store")
+    @patch("script.load_token_store")
+    @patch("script.load_credentials_store")
+    def test_clear_active_username_sets_both_stores_to_none(
+        self,
+        mock_load_credentials_store,
+        mock_load_token_store,
+        mock_save_credentials_store,
+        mock_save_token_store,
+    ):
+        mock_load_credentials_store.return_value = {
+            "active_username": "u1",
+            "accounts": [{"username": "u1", "password": "p1"}],
+        }
+        mock_load_token_store.return_value = {
+            "active_username": "u1",
+            "accounts": {"u1": {"access_token": "abc"}},
+        }
+
+        script.clear_active_username()
+
+        saved_credentials_payload = mock_save_credentials_store.call_args[0][0]
+        saved_token_payload = mock_save_token_store.call_args[0][0]
+        self.assertIsNone(saved_credentials_payload["active_username"])
+        self.assertIsNone(saved_token_payload["active_username"])
+
+    @patch("script.save_token_store")
+    @patch("script.save_credentials_store")
+    @patch("script.load_token_store")
+    @patch("script.load_credentials_store")
+    def test_remove_saved_account_deletes_user_from_credentials_and_tokens(
+        self,
+        mock_load_credentials_store,
+        mock_load_token_store,
+        mock_save_credentials_store,
+        mock_save_token_store,
+    ):
+        mock_load_credentials_store.return_value = {
+            "active_username": "u1",
+            "accounts": [
+                {"username": "u1", "password": "p1"},
+                {"username": "u2", "password": "p2"},
+            ],
+        }
+        mock_load_token_store.return_value = {
+            "active_username": "u1",
+            "accounts": {
+                "u1": {"access_token": "abc"},
+                "u2": {"access_token": "def"},
+            },
+        }
+
+        result = script.remove_saved_account("u1")
+
+        saved_credentials_payload = mock_save_credentials_store.call_args[0][0]
+        saved_token_payload = mock_save_token_store.call_args[0][0]
+        self.assertEqual([a["username"] for a in saved_credentials_payload["accounts"]], ["u2"])
+        self.assertEqual(set(saved_token_payload["accounts"].keys()), {"u2"})
+        self.assertIsNone(saved_credentials_payload["active_username"])
+        self.assertIsNone(saved_token_payload["active_username"])
+        self.assertEqual(result["active_username"], None)
+        self.assertEqual([a["username"] for a in result["accounts"]], ["u2"])
 
     def test_upsert_credentials_account_rejects_third_account(self):
         base_store = {
@@ -239,6 +303,7 @@ class ScriptTokenTests(unittest.TestCase):
         self.assertEqual(script.normalize_operation_state("cancelada_Por_Vencimiento_Validez"), "canceladas")
         self.assertEqual(script.normalize_operation_state("terminada"), "terminadas")
         self.assertEqual(script.normalize_operation_state("pendiente"), "pendientes")
+        self.assertEqual(script.normalize_operation_state("en_proceso"), "pendientes")
 
 
 if __name__ == "__main__":

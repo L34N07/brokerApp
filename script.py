@@ -99,8 +99,6 @@ def normalize_credentials_store(raw):
             break
 
     active_username = normalize_username(raw.get("active_username"))
-    if not active_username and accounts:
-        active_username = accounts[0]["username"]
 
     store["active_username"] = active_username
     store["accounts"] = accounts
@@ -126,8 +124,6 @@ def normalize_token_store(raw):
                 break
 
         active_username = normalize_username(raw.get("active_username"))
-        if not active_username and accounts:
-            active_username = next(iter(accounts), None)
 
         store["active_username"] = active_username
         store["accounts"] = accounts
@@ -168,8 +164,6 @@ def save_token_store(store):
             break
 
     active_username = normalize_username(store.get("active_username"))
-    if not active_username and accounts:
-        active_username = next(iter(accounts), None)
 
     payload = {
         "active_username": active_username,
@@ -229,10 +223,18 @@ def resolve_active_username(credentials_store=None, token_store=None):
     if credentials_active:
         return credentials_active
 
-    if credentials_store["accounts"]:
-        return credentials_store["accounts"][0]["username"]
+    return None
 
-    return next(iter(token_store["accounts"]), None)
+
+def clear_active_username():
+    credentials_store = load_credentials_store()
+    token_store = load_token_store()
+
+    credentials_store["active_username"] = None
+    token_store["active_username"] = None
+
+    save_credentials_store(credentials_store)
+    save_token_store(token_store)
 
 
 def set_active_username(username, require_existing=False):
@@ -641,7 +643,7 @@ def normalize_operation_state(estado):
         return "canceladas"
     if "terminad" in value:
         return "terminadas"
-    if "pend" in value:
+    if "pend" in value or "proceso" in value:
         return "pendientes"
     return "otras"
 
@@ -966,6 +968,68 @@ def select_account(payload):
     )
 
 
+def remove_saved_account(username):
+    normalized = normalize_username(username)
+    if not normalized:
+        raise RuntimeError("Debes indicar un usuario para eliminar.")
+
+    credentials_store = load_credentials_store()
+    token_store = load_token_store()
+
+    previous_credentials_count = len(credentials_store["accounts"])
+    credentials_store["accounts"] = [
+        account for account in credentials_store["accounts"] if account["username"] != normalized
+    ]
+    removed_from_credentials = len(credentials_store["accounts"]) != previous_credentials_count
+
+    token_accounts = dict(token_store["accounts"])
+    removed_from_tokens = token_accounts.pop(normalized, None) is not None
+    token_store["accounts"] = token_accounts
+
+    if not removed_from_credentials and not removed_from_tokens:
+        raise RuntimeError(f"La cuenta '{normalized}' no está guardada.")
+
+    if normalize_username(credentials_store.get("active_username")) == normalized:
+        credentials_store["active_username"] = None
+    if normalize_username(token_store.get("active_username")) == normalized:
+        token_store["active_username"] = None
+
+    save_credentials_store(credentials_store)
+    save_token_store(token_store)
+    return list_saved_accounts(credentials_store, token_store)
+
+
+def delete_account(payload):
+    username = normalize_username(payload.get("username"))
+    try:
+        accounts_data = remove_saved_account(username)
+    except RuntimeError as exc:
+        emit({"estado": "error", "mensaje": str(exc)})
+        return
+
+    emit(
+        {
+            "estado": "ok",
+            "mensaje": f"Cuenta eliminada: {username}.",
+            "active_username": accounts_data["active_username"],
+            "accounts": accounts_data["accounts"],
+        }
+    )
+
+
+def logout():
+    clear_active_username()
+    accounts_data = list_saved_accounts()
+    emit(
+        {
+            "estado": "ok",
+            "mensaje": "Sesión cerrada.",
+            "active_username": accounts_data["active_username"],
+            "accounts": accounts_data["accounts"],
+        }
+    )
+
+
 def parse_command_payload():
     if len(sys.argv) < 3:
         return {}
@@ -1010,6 +1074,12 @@ def main():
         return
     if command == "select-account":
         select_account(payload)
+        return
+    if command == "delete-account":
+        delete_account(payload)
+        return
+    if command == "logout":
+        logout()
         return
 
     emit(

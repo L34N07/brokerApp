@@ -1,11 +1,15 @@
 const portfolioButton = document.getElementById('btn-load-portfolio');
 const accountButton = document.getElementById('btn-load-account-status');
 const operationsButton = document.getElementById('btn-open-operations');
-const changeAccountButton = document.getElementById('btn-change-account');
+const logoutButton = document.getElementById('btn-logout');
+const dataGrid = document.getElementById('data-grid');
 const portfolioContainer = document.getElementById('portfolio');
 const accountContainer = document.getElementById('account-status');
 
 let activeUsername = '';
+let selectedSection = null;
+let loadedPortfolio = false;
+let loadedAccountStatus = false;
 let toastNode = null;
 let toastTimeoutId = null;
 let hasShownActiveAccountToast = false;
@@ -104,10 +108,6 @@ function formatNumber(value, decimals = 2) {
   return getDecimalFormatter(decimals).format(rounded);
 }
 
-function formatMoney(value, symbol) {
-  return `${safeText(symbol, '')} ${formatNumber(value)}`.trim();
-}
-
 function clearNode(node) {
   while (node.firstChild) {
     node.removeChild(node.firstChild);
@@ -136,6 +136,55 @@ function setActionsEnabled(enabled) {
   portfolioButton.disabled = !enabled;
   accountButton.disabled = !enabled;
   operationsButton.disabled = !enabled;
+  logoutButton.disabled = !enabled;
+  if (!enabled) {
+    selectedSection = null;
+    setActiveSelection(null);
+    syncDataPanelsVisibility();
+  }
+}
+
+function setActiveSelection(section) {
+  const normalizedSelection = String(section || '').toLowerCase();
+  const buttonMap = new Map([
+    [portfolioButton, 'portfolio'],
+    [accountButton, 'cuenta'],
+    [operationsButton, 'operaciones']
+  ]);
+
+  for (const [button, buttonSection] of buttonMap.entries()) {
+    const active = buttonSection === normalizedSelection;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-selected', String(active));
+  }
+}
+
+function syncDataPanelsVisibility() {
+  const showPortfolio = selectedSection === 'portfolio' && loadedPortfolio;
+  const showAccount = selectedSection === 'cuenta' && loadedAccountStatus;
+  const showGrid = showPortfolio || showAccount;
+
+  dataGrid.hidden = !showGrid;
+  portfolioContainer.hidden = !showPortfolio;
+  accountContainer.hidden = !showAccount;
+}
+
+function clearSelection() {
+  selectedSection = null;
+  setActiveSelection(null);
+  syncDataPanelsVisibility();
+}
+
+function toggleSection(section) {
+  const normalizedSection = String(section || '').toLowerCase();
+  if (selectedSection === normalizedSection) {
+    clearSelection();
+    return false;
+  }
+  selectedSection = normalizedSection;
+  setActiveSelection(selectedSection);
+  syncDataPanelsVisibility();
+  return true;
 }
 
 function renderError(targetNode, message) {
@@ -161,6 +210,22 @@ function movementClass(value) {
     return '';
   }
   return number < 0 ? 'loss' : 'profit';
+}
+
+function resolveCurrencyCode(cuenta) {
+  const symbol = safeText(cuenta?.simboloMoneda, '').trim();
+  if (symbol === 'AR$' || symbol === 'USD') {
+    return symbol;
+  }
+
+  const raw = safeText(cuenta?.moneda, '').toLowerCase();
+  if (raw.includes('peso')) {
+    return 'AR$';
+  }
+  if (raw.includes('dolar') || raw.includes('dólar')) {
+    return 'USD';
+  }
+  return '-';
 }
 
 function renderPanelHeader(container, title) {
@@ -227,13 +292,13 @@ function renderAccountStatus(data) {
   const tbody = document.createElement('tbody');
   for (const cuenta of data.cuentas || []) {
     const row = document.createElement('tr');
-    const symbol = safeText(cuenta.simboloMoneda, '');
-    row.appendChild(createCell(cuenta.moneda));
-    row.appendChild(createCell(formatMoney(cuenta.disponible, symbol)));
-    row.appendChild(createCell(formatMoney(cuenta.comprometido, symbol)));
-    row.appendChild(createCell(formatMoney(cuenta.saldo, symbol)));
-    row.appendChild(createCell(formatMoney(cuenta.titulosValorizados, symbol)));
-    row.appendChild(createCell(formatMoney(cuenta.total, symbol), movementClass(cuenta.total)));
+    const currencyText = resolveCurrencyCode(cuenta);
+    row.appendChild(createCell(currencyText));
+    row.appendChild(createCell(formatNumber(cuenta.disponible)));
+    row.appendChild(createCell(formatNumber(cuenta.comprometido)));
+    row.appendChild(createCell(formatNumber(cuenta.saldo)));
+    row.appendChild(createCell(formatNumber(cuenta.titulosValorizados)));
+    row.appendChild(createCell(formatNumber(cuenta.total), movementClass(cuenta.total)));
     tbody.appendChild(row);
   }
 
@@ -250,6 +315,13 @@ async function refreshActiveAccount() {
   const previousUsername = activeUsername;
   activeUsername = safeText(response.active_username, '').trim();
   if (activeUsername) {
+    if (activeUsername !== previousUsername) {
+      loadedPortfolio = false;
+      loadedAccountStatus = false;
+      clearNode(portfolioContainer);
+      clearNode(accountContainer);
+      clearSelection();
+    }
     setActionsEnabled(true);
     if (!hasShownActiveAccountToast || activeUsername !== previousUsername) {
       setStatus(`Cuenta activa: ${activeUsername}.`, 'ok');
@@ -260,12 +332,12 @@ async function refreshActiveAccount() {
 
   hasShownActiveAccountToast = false;
   setActionsEnabled(false);
-  setStatus('No hay cuenta activa. Usá "Cambiar Cuenta".', 'error');
+  setStatus('No hay cuenta activa. Iniciá sesión.', 'error');
 }
 
 async function loadPortfolio() {
   if (!activeUsername) {
-    setStatus('No hay cuenta activa. Usá "Cambiar Cuenta".', 'error');
+    setStatus('No hay cuenta activa. Iniciá sesión.', 'error');
     return;
   }
 
@@ -276,13 +348,25 @@ async function loadPortfolio() {
     const response = await window.apiBroker.getPortfolio();
     if (Array.isArray(response.activos)) {
       renderPortfolio(response);
+      loadedPortfolio = true;
+      if (selectedSection === 'portfolio') {
+        syncDataPanelsVisibility();
+      }
       setStatus('Portafolio actualizado.', 'ok');
       return;
     }
 
+    loadedPortfolio = false;
+    if (selectedSection === 'portfolio') {
+      syncDataPanelsVisibility();
+    }
     renderError(portfolioContainer, response.mensaje || JSON.stringify(response, null, 2));
     setStatus(response.mensaje || 'Error al consultar portafolio.', 'error');
   } catch (error) {
+    loadedPortfolio = false;
+    if (selectedSection === 'portfolio') {
+      syncDataPanelsVisibility();
+    }
     renderError(portfolioContainer, error.message);
     setStatus(error.message, 'error');
   } finally {
@@ -292,7 +376,7 @@ async function loadPortfolio() {
 
 async function loadAccountStatus() {
   if (!activeUsername) {
-    setStatus('No hay cuenta activa. Usá "Cambiar Cuenta".', 'error');
+    setStatus('No hay cuenta activa. Iniciá sesión.', 'error');
     return;
   }
 
@@ -303,13 +387,25 @@ async function loadAccountStatus() {
     const response = await window.apiBroker.getAccountStatus();
     if (Array.isArray(response.cuentas)) {
       renderAccountStatus(response);
+      loadedAccountStatus = true;
+      if (selectedSection === 'cuenta') {
+        syncDataPanelsVisibility();
+      }
       setStatus('Estado de cuenta actualizado.', 'ok');
       return;
     }
 
+    loadedAccountStatus = false;
+    if (selectedSection === 'cuenta') {
+      syncDataPanelsVisibility();
+    }
     renderError(accountContainer, response.mensaje || JSON.stringify(response, null, 2));
     setStatus(response.mensaje || 'Error al consultar estado de cuenta.', 'error');
   } catch (error) {
+    loadedAccountStatus = false;
+    if (selectedSection === 'cuenta') {
+      syncDataPanelsVisibility();
+    }
     renderError(accountContainer, error.message);
     setStatus(error.message, 'error');
   } finally {
@@ -326,7 +422,46 @@ async function openLoginWindow() {
   }
 }
 
+async function logoutSession() {
+  if (!activeUsername) {
+    return;
+  }
+
+  logoutButton.disabled = true;
+  setStatus(`Cerrando sesión (${activeUsername})...`, 'neutral');
+
+  try {
+    const response = await window.apiBroker.logout();
+    if (response.estado !== 'ok') {
+      setStatus(response.mensaje || 'No se pudo cerrar la sesión.', 'error');
+      return;
+    }
+
+    activeUsername = '';
+    hasShownActiveAccountToast = false;
+    selectedSection = null;
+    loadedPortfolio = false;
+    loadedAccountStatus = false;
+    setActiveSelection(null);
+    syncDataPanelsVisibility();
+    clearNode(portfolioContainer);
+    clearNode(accountContainer);
+    setActionsEnabled(false);
+    await openLoginWindow();
+    setStatus('Sesión cerrada.', 'ok');
+  } catch (error) {
+    setStatus(error.message || 'No se pudo cerrar la sesión.', 'error');
+  } finally {
+    logoutButton.disabled = false;
+  }
+}
+
 async function initialize() {
+  selectedSection = null;
+  loadedPortfolio = false;
+  loadedAccountStatus = false;
+  setActiveSelection(null);
+  syncDataPanelsVisibility();
   setActionsEnabled(false);
   try {
     await refreshActiveAccount();
@@ -336,14 +471,23 @@ async function initialize() {
 }
 
 portfolioButton.addEventListener('click', () => {
+  if (!toggleSection('portfolio')) {
+    return;
+  }
   loadPortfolio();
 });
 
 accountButton.addEventListener('click', () => {
+  if (!toggleSection('cuenta')) {
+    return;
+  }
   loadAccountStatus();
 });
 
 operationsButton.addEventListener('click', async () => {
+  if (!toggleSection('operaciones')) {
+    return;
+  }
   try {
     await window.apiBroker.openOperationsWindow();
   } catch (_error) {
@@ -351,8 +495,8 @@ operationsButton.addEventListener('click', async () => {
   }
 });
 
-changeAccountButton.addEventListener('click', () => {
-  openLoginWindow();
+logoutButton.addEventListener('click', () => {
+  logoutSession();
 });
 
 window.addEventListener('focus', () => {

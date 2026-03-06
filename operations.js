@@ -16,6 +16,7 @@ const detailedTimeFromInput = document.getElementById('detail-time-from');
 const detailedDateToInput = document.getElementById('detail-date-to');
 const detailedTimeToInput = document.getElementById('detail-time-to');
 const detailedTypeSelect = document.getElementById('detail-type-filter');
+const detailedStatusSelect = document.getElementById('detail-status-filter');
 const detailedLoadButton = document.getElementById('btn-load-detailed-operations');
 const detailedOperationsBody = document.getElementById('detailed-operations-body');
 const detailedEmpty = document.getElementById('detailed-empty');
@@ -34,7 +35,7 @@ let availableSymbols = [];
 let isSummaryLoading = false;
 
 let detailedOperations = [];
-let detailedFilters = { ...buildDefaultRequestFilters(), tipo: 'todas' };
+let detailedFilters = { ...buildDefaultRequestFilters(), tipo: 'todas', estado: 'todas' };
 let detailLoadedOnce = false;
 let isDetailedLoading = false;
 
@@ -287,11 +288,22 @@ function setDetailedFiltersInputs(filters) {
   detailedTimeFromInput.value = safeText(filters.horaDesde, '00:00:00');
   detailedTimeToInput.value = safeText(filters.horaHasta, '00:00:00');
   detailedTypeSelect.value = sanitizeDetailedTypeFilter(filters.tipo);
+  if (detailedStatusSelect) {
+    detailedStatusSelect.value = sanitizeDetailedStatusFilter(filters.estado);
+  }
 }
 
 function sanitizeDetailedTypeFilter(value) {
   const normalized = safeText(value, 'todas').toLowerCase();
   if (normalized === 'compra' || normalized === 'venta') {
+    return normalized;
+  }
+  return 'todas';
+}
+
+function sanitizeDetailedStatusFilter(value) {
+  const normalized = safeText(value, 'todas').toLowerCase();
+  if (normalized === 'terminadas' || normalized === 'canceladas' || normalized === 'pendientes') {
     return normalized;
   }
   return 'todas';
@@ -303,7 +315,8 @@ function readDetailedFiltersFromInputs() {
     fechaHasta: safeText(detailedDateToInput.value, ''),
     horaDesde: safeText(detailedTimeFromInput.value, '00:00:00'),
     horaHasta: safeText(detailedTimeToInput.value, '00:00:00'),
-    tipo: sanitizeDetailedTypeFilter(detailedTypeSelect.value)
+    tipo: sanitizeDetailedTypeFilter(detailedTypeSelect.value),
+    estado: sanitizeDetailedStatusFilter(detailedStatusSelect ? detailedStatusSelect.value : 'todas')
   };
 }
 
@@ -379,6 +392,9 @@ function setControlsEnabled(enabled) {
   autoRefreshToggle.disabled = !hasActiveUser;
   autoRefreshIntervalSelect.disabled = !hasActiveUser;
   detailedTypeSelect.disabled = !hasActiveUser || isDetailedLoading;
+  if (detailedStatusSelect) {
+    detailedStatusSelect.disabled = !hasActiveUser || isDetailedLoading;
+  }
   detailedLoadButton.disabled = !hasActiveUser || isDetailedLoading;
 
   const canAddChart = hasActiveUser && availableSymbols.length > 0;
@@ -768,15 +784,25 @@ function appendDetailedCell(row, value) {
   row.appendChild(td);
 }
 
-function filterDetailedOperationsByType(operations, typeFilter) {
+function filterDetailedOperations(operations, typeFilter, statusFilter) {
   const selectedType = sanitizeDetailedTypeFilter(typeFilter);
-  if (selectedType === 'todas') {
-    return operations.slice();
-  }
+  const selectedStatus = sanitizeDetailedStatusFilter(statusFilter);
 
   return operations.filter((operation) => {
     const normalizedType = operation.tipoFiltro || normalizeOperationType(operation.tipo);
-    return normalizedType === selectedType;
+    if (selectedType !== 'todas' && normalizedType !== selectedType) {
+      return false;
+    }
+
+    let normalizedStatus = operation.estadoFiltro || normalizeOperationStatus(operation.estado);
+    if (normalizedStatus === 'otras') {
+      normalizedStatus = normalizeOperationStatus(operation.estado);
+    }
+    if (selectedStatus !== 'todas' && normalizedStatus !== selectedStatus) {
+      return false;
+    }
+
+    return true;
   });
 }
 
@@ -820,7 +846,11 @@ function resetDetailedData(message = 'Aun no hay datos cargados para este filtro
 }
 
 function renderDetailedOperationsFromCurrentState() {
-  const filteredOperations = filterDetailedOperationsByType(detailedOperations, detailedFilters.tipo);
+  const filteredOperations = filterDetailedOperations(
+    detailedOperations,
+    detailedFilters.tipo,
+    detailedFilters.estado
+  );
   renderDetailedOperationsTable(filteredOperations);
   return filteredOperations.length;
 }
@@ -856,8 +886,10 @@ async function loadDetailedOperations() {
     detailLoadedOnce = true;
     const visibleCount = renderDetailedOperationsFromCurrentState();
     const selectedType = sanitizeDetailedTypeFilter(detailedFilters.tipo);
+    const selectedStatus = sanitizeDetailedStatusFilter(detailedFilters.estado);
     const typeDetail = selectedType === 'todas' ? 'todas' : selectedType;
-    setStatus(`Operaciones detalladas cargadas: ${visibleCount} (tipo: ${typeDetail}).`, 'ok');
+    const statusDetail = selectedStatus === 'todas' ? 'todos' : selectedStatus;
+    setStatus(`Operaciones detalladas cargadas: ${visibleCount} (tipo: ${typeDetail}, estado: ${statusDetail}).`, 'ok');
   } catch (error) {
     resetDetailedData('Error al cargar operaciones detalladas.');
     setStatus(error.message, 'error');
@@ -1007,6 +1039,21 @@ function handleDetailedTypeFilterChange() {
   setStatus(`Filtro de tipo aplicado: ${detailedFilters.tipo}. Operaciones: ${visibleCount}.`, 'neutral');
 }
 
+function handleDetailedStatusFilterChange() {
+  if (!detailedStatusSelect) {
+    return;
+  }
+  detailedFilters.estado = sanitizeDetailedStatusFilter(detailedStatusSelect.value);
+  detailedStatusSelect.value = detailedFilters.estado;
+
+  if (!detailLoadedOnce) {
+    return;
+  }
+
+  const visibleCount = renderDetailedOperationsFromCurrentState();
+  setStatus(`Filtro de estado aplicado: ${detailedFilters.estado}. Operaciones: ${visibleCount}.`, 'neutral');
+}
+
 function handleMenuClickOutside(event) {
   if (topMenu.hidden) {
     return;
@@ -1021,7 +1068,7 @@ function handleMenuClickOutside(event) {
 }
 
 async function initialize() {
-  detailedFilters = { ...buildDefaultRequestFilters(), tipo: 'todas' };
+  detailedFilters = { ...buildDefaultRequestFilters(), tipo: 'todas', estado: 'todas' };
   setDetailedFiltersInputs(detailedFilters);
   applyMainTab('tab-symbols');
   setControlsEnabled(false);
@@ -1059,6 +1106,12 @@ detailedLoadButton.addEventListener('click', () => {
 detailedTypeSelect.addEventListener('change', () => {
   handleDetailedTypeFilterChange();
 });
+
+if (detailedStatusSelect) {
+  detailedStatusSelect.addEventListener('change', () => {
+    handleDetailedStatusFilterChange();
+  });
+}
 
 addChartInitialButton.addEventListener('click', () => {
   createChartCard();

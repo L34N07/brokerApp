@@ -1,8 +1,10 @@
 const accessButton = document.getElementById('btn-access-account');
 const addAccountButton = document.getElementById('btn-add-account');
+const deleteAccountButton = document.getElementById('btn-delete-account');
 const savedUserSelect = document.getElementById('saved-user-select');
 const usernameInput = document.getElementById('username-input');
 const passwordInput = document.getElementById('password-input');
+const passwordToggleButton = document.getElementById('btn-toggle-password');
 
 let toastNode = null;
 let toastTimeoutId = null;
@@ -65,6 +67,20 @@ function safeText(value, fallback = '') {
   return String(value).trim();
 }
 
+function setPasswordVisibility(visible) {
+  const shouldShow = Boolean(visible);
+  passwordInput.type = shouldShow ? 'text' : 'password';
+  passwordToggleButton.setAttribute('aria-pressed', String(shouldShow));
+  passwordToggleButton.setAttribute(
+    'aria-label',
+    shouldShow ? 'Ocultar contraseña' : 'Mostrar contraseña'
+  );
+  passwordToggleButton.setAttribute(
+    'title',
+    shouldShow ? 'Ocultar contraseña' : 'Mostrar contraseña'
+  );
+}
+
 function setStatus(message, tone = 'neutral') {
   if (!message) {
     return;
@@ -100,8 +116,7 @@ function setUserSelectOptions(accounts, activeUser) {
     }
     const option = document.createElement('option');
     option.value = username;
-    const hasToken = account?.has_token ? 'token' : 'sin token';
-    option.textContent = `${username} (${hasToken})`;
+    option.textContent = username;
     savedUserSelect.appendChild(option);
   }
 
@@ -112,6 +127,7 @@ function setUserSelectOptions(accounts, activeUser) {
       savedUserSelect.value = '';
     }
   }
+  deleteAccountButton.disabled = !safeText(savedUserSelect.value);
 }
 
 async function refreshAccounts() {
@@ -190,6 +206,7 @@ async function handleAddAccount() {
     }
 
     passwordInput.value = '';
+    setPasswordVisibility(false);
     await finalizeLogin();
   } catch (error) {
     setStatus(error.message, 'error');
@@ -198,10 +215,43 @@ async function handleAddAccount() {
   }
 }
 
+async function handleDeleteAccount() {
+  const username = safeText(savedUserSelect.value);
+  if (!username) {
+    setStatus('Seleccioná una cuenta guardada para eliminar.', 'error');
+    return;
+  }
+
+  const confirmed = window.confirm(`¿Eliminar la cuenta guardada '${username}'?`);
+  if (!confirmed) {
+    return;
+  }
+
+  deleteAccountButton.disabled = true;
+  accessButton.disabled = true;
+  setStatus(`Eliminando cuenta '${username}'...`, 'neutral');
+
+  try {
+    const response = await window.apiBroker.deleteAccount({ username });
+    if (response.estado !== 'ok') {
+      throw new Error(response.mensaje || 'No se pudo eliminar la cuenta.');
+    }
+
+    await refreshAccounts();
+    setStatus(response.mensaje || 'Cuenta eliminada.', 'ok');
+  } catch (error) {
+    setStatus(error.message, 'error');
+  } finally {
+    accessButton.disabled = false;
+    deleteAccountButton.disabled = !safeText(savedUserSelect.value);
+  }
+}
+
 savedUserSelect.addEventListener('change', () => {
   const username = safeText(savedUserSelect.value);
+  deleteAccountButton.disabled = !username;
   if (username) {
-    setStatus(`Cuenta seleccionada: ${username}. Presioná Acceder.`, 'neutral');
+    setStatus(`Cuenta seleccionada: ${username}.`, 'neutral');
   }
 });
 
@@ -224,6 +274,16 @@ accessButton.addEventListener('click', () => {
 addAccountButton.addEventListener('click', () => {
   handleAddAccount();
 });
+
+deleteAccountButton.addEventListener('click', () => {
+  handleDeleteAccount();
+});
+
+passwordToggleButton.addEventListener('click', () => {
+  setPasswordVisibility(passwordInput.type === 'password');
+});
+
+setPasswordVisibility(false);
 
 refreshAccounts().catch((error) => {
   setStatus(error.message, 'error');

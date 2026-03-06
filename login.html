@@ -6,15 +6,15 @@
   <title>Login - Panel IOL</title>
   <style>
     :root {
-      --bg: #eef1f0;
-      --bg-soft: #f7f9f8;
+      --bg: #f3f9f0;
+      --bg-soft: #fbfef9;
       --surface: #ffffff;
-      --text: #273136;
-      --muted: #6f7d78;
-      --border: #dbe3df;
-      --green: #2d8a68;
+      --text: #2b3238;
+      --muted: #67717a;
+      --border: #e2e8e1;
+      --green: #2f7b45;
       --green-soft: #e3f2eb;
-      --red: #bb4f5b;
+      --red: #c84a4a;
     }
 
     * {
@@ -30,17 +30,14 @@
       margin: 0;
       font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
       color: var(--text);
-      background:
-        radial-gradient(circle at 0% 0%, #f9fbfa 0, transparent 45%),
-        radial-gradient(circle at 100% 100%, #e8f3ee 0, transparent 38%),
-        linear-gradient(180deg, var(--bg-soft) 0%, var(--bg) 100%);
+      background: linear-gradient(180deg, var(--bg-soft) 0%, var(--bg) 100%);
       min-height: 100%;
       display: flex;
       padding: clamp(14px, 2.2vw, 24px);
     }
 
     .card {
-      width: min(760px, 100%);
+      width: min(700px, 100%);
       margin: auto;
       background: var(--surface);
       border: 1px solid var(--border);
@@ -49,50 +46,39 @@
       overflow: hidden;
       display: flex;
       flex-direction: column;
-      max-height: 100%;
     }
 
     .header {
-      padding: 22px 22px 16px;
+      padding: 20px 22px;
       border-bottom: 1px solid var(--border);
-      background: linear-gradient(180deg, #fbfdfc 0%, #f4f8f6 100%);
+      background: #f9fcf8;
     }
 
     .title {
       margin: 0;
-      font-size: clamp(1.4rem, 1.2rem + 0.7vw, 1.8rem);
+      font-size: clamp(1.4rem, 1.2rem + 0.7vw, 1.7rem);
       letter-spacing: 0.02em;
-    }
-
-    .subtitle {
-      margin: 4px 0 0;
-      color: var(--muted);
-      font-size: 0.92rem;
     }
 
     .content {
       display: grid;
-      gap: 16px;
-      padding: 18px;
-      overflow: auto;
+      gap: 14px;
+      padding: 16px;
     }
 
-    .section {
+    .group {
       display: grid;
       gap: 8px;
-      padding: 12px;
-      border: 1px solid #dce5e1;
+      padding: 12px 12px 14px;
+      border: 1px solid var(--border);
       border-radius: 12px;
-      background: #fbfdfc;
+      background: #fbfdfb;
     }
 
-    .section-title {
-      margin: 0;
-      color: #49635b;
-      font-size: 0.84rem;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-      font-weight: 700;
+    .group-label {
+      color: var(--muted);
+      font-size: 0.9rem;
+      font-weight: 600;
     }
 
     .row {
@@ -102,9 +88,13 @@
       align-items: center;
     }
 
+    .row-actions {
+      justify-content: center;
+    }
+
     input,
     select {
-      border: 1px solid #cedbd5;
+      border: 1px solid #d7e1db;
       border-radius: 10px;
       padding: 9px 10px;
       color: var(--text);
@@ -114,31 +104,94 @@
       min-width: 140px;
     }
 
+    .password-field {
+      position: relative;
+      flex: 1 1 180px;
+      min-width: 140px;
+    }
+
+    .password-field input {
+      width: 100%;
+      padding-right: 36px;
+    }
+
     button {
-      border: 1px solid transparent;
-      border-radius: 10px;
-      padding: 10px 16px;
-      font-size: 0.92rem;
+      border: 0;
+      border-radius: 8px;
+      padding: 6px 10px;
+      min-height: 30px;
+      font-size: 0.8rem;
       font-weight: 600;
-      background: var(--green);
-      color: white;
+      background: #4d8757;
+      color: #f6ffee;
       cursor: pointer;
-      transition: transform 120ms ease, background 120ms ease;
+      transition: background 120ms ease;
       white-space: nowrap;
+      width: auto;
     }
 
     button:hover:not(:disabled) {
-      background: #247a5b;
-      transform: translateY(-1px);
+      background: #2d6f3f;
     }
 
     button:disabled {
       opacity: 0.6;
       cursor: not-allowed;
-      transform: none;
     }
 
-    @media (max-width: 760px) {
+    .danger-btn {
+      background: var(--red);
+    }
+
+    .danger-btn:hover:not(:disabled) {
+      background: #ae3636;
+    }
+
+    #btn-access-account,
+    #btn-delete-account,
+    #btn-add-account {
+      flex: 0 0 auto;
+      min-width: 96px;
+    }
+
+    #btn-access-account,
+    #btn-delete-account {
+      min-width: 124px;
+    }
+
+    .password-toggle {
+      position: absolute;
+      right: 6px;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 24px;
+      min-width: 24px;
+      min-height: 24px;
+      padding: 0;
+      border-radius: 6px;
+      background: transparent;
+      color: #62706a;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .password-toggle svg {
+      width: 16px;
+      height: 16px;
+      stroke: currentColor;
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .password-toggle:hover:not(:disabled) {
+      background: #eef4ef;
+      color: #405149;
+    }
+
+    @media (max-width: 560px) {
       .header {
         padding: 16px;
       }
@@ -156,26 +209,36 @@
 <body>
   <main class="card">
     <header class="header">
-      <h1 class="title">Ingreso a Cuenta</h1>
-      <p class="subtitle">Seleccioná una cuenta existente o agregá una nueva para usar en todas las ventanas.</p>
+      <h1 class="title">Inciar</h1>
     </header>
 
     <section class="content">
-      <section class="section">
-        <h2 class="section-title">Cuenta guardada</h2>
+      <section class="group">
+        <label class="group-label" for="saved-user-select">Elegir Usuario</label>
         <div class="row">
           <select id="saved-user-select">
-            <option value="">Usuarios guardados</option>
+            <option value="">Seleccionar</option>
           </select>
+        </div>
+        <div class="row row-actions">
           <button id="btn-access-account" type="button">Acceder</button>
+          <button id="btn-delete-account" type="button" class="danger-btn">Eliminar usuario</button>
         </div>
       </section>
 
-      <section class="section">
-        <h2 class="section-title">Agregar cuenta</h2>
+      <section class="group">
+        <label class="group-label" for="username-input">Agregar Usuario</label>
         <div class="row">
           <input id="username-input" type="text" placeholder="Usuario IOL" autocomplete="username">
-          <input id="password-input" type="password" placeholder="Contraseña" autocomplete="current-password">
+          <div class="password-field">
+            <input id="password-input" type="password" placeholder="Contraseña" autocomplete="current-password">
+            <button id="btn-toggle-password" class="password-toggle" type="button" aria-label="Mostrar contraseña" title="Mostrar contraseña" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+            </button>
+          </div>
           <button id="btn-add-account" type="button">Agregar cuenta</button>
         </div>
       </section>
