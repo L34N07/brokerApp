@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Login - Panel IOL</title>
+  <link rel="stylesheet" href="./styles/common.css">
+  <link rel="stylesheet" href="./styles/login.css">
+</head>
+<body>
+  <main class="card">
+    <header class="header">
+      <h1 class="title">Inciar</h1>
+    </header>
+
+    <section class="content">
+      <section class="group">
+        <label class="group-label" for="saved-user-select">Elegir Usuario</label>
+        <div class="row">
+          <select id="saved-user-select">
+            <option value="">Seleccionar</option>
+          </select>
+        </div>
+        <div class="row row-actions">
+          <button id="btn-access-account" type="button">Acceder</button>
+          <button id="btn-delete-account" type="button" class="danger-btn">Eliminar usuario</button>
+        </div>
+      </section>
+
+      <section class="group">
+        <label class="group-label" for="username-input">Agregar Usuario</label>
+        <div class="row">
+          <input id="username-input" type="text" placeholder="Usuario IOL" autocomplete="username">
+          <div class="password-field">
+            <input id="password-input" type="password" placeholder="Contraseña" autocomplete="current-password">
+            <button id="btn-toggle-password" class="password-toggle" type="button" aria-label="Mostrar contraseña" title="Mostrar contraseña" aria-pressed="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M2 12s3.5-6 10-6 10 6 10 6-3.5 6-10 6-10-6-10-6z"></path>
+                <circle cx="12" cy="12" r="3"></circle>
+              </svg>
+            </button>
+          </div>
+          <button id="btn-add-account" type="button">Agregar cuenta</button>
+        </div>
+      </section>
+    </section>
+  </main>
+
+  <script src="./scripts/login.js"></script>
+</body>
+</html>

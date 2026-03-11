@@ -6,7 +6,6 @@ contextBridge.exposeInMainWorld('apiBroker', {
   getAccountStatus: (payload) => ipcRenderer.invoke('broker:get-account-status', payload),
   getOperations: (filters) => ipcRenderer.invoke('broker:get-operations', filters),
   openOperationsWindow: () => ipcRenderer.invoke('broker:open-operations-window'),
-  openLoginWindow: () => ipcRenderer.invoke('broker:open-login-window'),
   logout: () => ipcRenderer.invoke('broker:logout'),
   activateSession: () => ipcRenderer.invoke('broker:activate-session'),
   listAccounts: () => ipcRenderer.invoke('broker:list-accounts'),

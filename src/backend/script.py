@@ -15,7 +15,7 @@ TOKEN_REFRESH_MARGIN_SECONDS = int(os.getenv("IOL_TOKEN_REFRESH_MARGIN_SECONDS",
 DEFAULT_BEARER_EXPIRATION_SECONDS = int(os.getenv("IOL_DEFAULT_BEARER_EXPIRATION_SECONDS", "900"))
 MAX_STORED_ACCOUNTS = int(os.getenv("IOL_MAX_STORED_ACCOUNTS", "2"))
 
-PROJECT_DIR = Path(__file__).resolve().parent
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def get_data_dir():
@@ -26,7 +26,7 @@ def get_data_dir():
     if getattr(sys, "frozen", False):
         return Path.home() / ".brokerapp"
 
-    return PROJECT_DIR
+    return PROJECT_ROOT
 
 
 DATA_DIR = get_data_dir()

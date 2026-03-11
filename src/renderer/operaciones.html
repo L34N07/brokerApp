@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Operaciones - Panel IOL</title>
+  <link rel="stylesheet" href="./styles/common.css">
+  <link rel="stylesheet" href="./styles/operations.css">
+</head>
+<body>
+  <main class="layout">
+    <section class="panel">
+      <div class="top-bar">
+        <div class="main-tabs">
+          <button type="button" class="main-tab-btn active" data-main-tab="tab-symbols">Resumen por simbolo</button>
+          <button type="button" class="main-tab-btn" data-main-tab="tab-all-operations">Todas las operaciones</button>
+        </div>
+
+        <div class="top-actions">
+          <div class="refresh-meta">
+            <span class="ar-pill">
+              <span id="auto-refresh-light" class="ar-light off"></span>
+              <span id="auto-refresh-label">AR: OFF</span>
+            </span>
+            <span id="last-refresh-text" class="refresh-time">Ult refresh: --:--:--</span>
+          </div>
+          <button id="btn-top-menu" class="menu-btn" type="button" aria-label="Abrir menu" aria-expanded="false">
+            <span class="menu-icon" aria-hidden="true">
+              <span></span>
+              <span></span>
+              <span></span>
+            </span>
+          </button>
+
+          <div id="top-menu" class="menu-dropdown" hidden>
+            <button id="btn-reload-operations" type="button" class="menu-item-btn">Recargar operaciones ahora</button>
+
+            <label class="menu-check">
+              <input id="auto-refresh-enabled" type="checkbox">
+              Activar auto refresh
+            </label>
+
+            <div class="menu-field">
+              <label class="menu-field-label" for="auto-refresh-interval">Intervalo</label>
+              <select id="auto-refresh-interval" class="menu-select">
+                <option value="20">20s</option>
+                <option value="30">30s</option>
+                <option value="60" selected>60s</option>
+                <option value="120">120s</option>
+                <option value="300">300s</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-symbols" class="tab-panel active" data-main-panel>
+        <div id="charts-grid" class="charts-grid">
+          <div id="grid-add-zone" class="add-zone add-zone-grid">
+            <button id="btn-add-chart-initial" class="add-chart-btn" type="button" title="Agregar tarjeta">+</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="tab-all-operations" class="tab-panel" data-main-panel>
+        <section class="filters-card">
+          <div class="filters-grid">
+            <div class="filters-line">
+              <div class="filter-group">
+                <label for="detail-date-from">Fecha desde</label>
+                <input id="detail-date-from" class="filter-input" type="date">
+              </div>
+              <div class="filter-group">
+                <label for="detail-date-to">Fecha hasta</label>
+                <input id="detail-date-to" class="filter-input" type="date">
+              </div>
+            </div>
+
+            <div class="filters-line">
+              <div class="filter-group">
+                <label for="detail-time-from">Hora desde</label>
+                <input id="detail-time-from" class="filter-input" type="time" step="1">
+              </div>
+              <div class="filter-group">
+                <label for="detail-time-to">Hora hasta</label>
+                <input id="detail-time-to" class="filter-input" type="time" step="1">
+              </div>
+            </div>
+
+            <div class="filters-line">
+              <div class="filter-group">
+                <label for="detail-type-filter">Tipo</label>
+                <select id="detail-type-filter" class="filter-input">
+                  <option value="todas" selected>Todas</option>
+                  <option value="compra">Compra</option>
+                  <option value="venta">Venta</option>
+                </select>
+              </div>
+              <div class="filter-group">
+                <label for="detail-status-filter">Estado</label>
+                <select id="detail-status-filter" class="filter-input">
+                  <option value="todas" selected>Todas</option>
+                  <option value="terminadas">Terminada</option>
+                  <option value="canceladas">Cancelado</option>
+                  <option value="pendientes">Pendientes</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="filters-action-line">
+              <button id="btn-load-detailed-operations" class="filter-action" type="button">Buscar</button>
+            </div>
+          </div>
+        </section>
+
+        <div class="table-wrap">
+          <table class="operations-table">
+            <colgroup>
+              <col style="width: 130px;">
+              <col style="width: 90px;">
+              <col style="width: 150px;">
+              <col style="width: 110px;">
+              <col style="width: 100px;">
+              <col style="width: 100px;">
+              <col style="width: 120px;">
+              <col style="width: 100px;">
+              <col style="width: 130px;">
+              <col style="width: 120px;">
+              <col style="width: 130px;">
+            </colgroup>
+            <thead>
+              <tr>
+                <th>Fecha orden</th>
+                <th>Tipo</th>
+                <th>Estado</th>
+                <th>Mercado</th>
+                <th>Simbolo</th>
+                <th>Cantidad</th>
+                <th>Monto</th>
+                <th>Precio</th>
+                <th>Cantidad operada</th>
+                <th>Precio operado</th>
+                <th>Monto operado</th>
+              </tr>
+            </thead>
+            <tbody id="detailed-operations-body"></tbody>
+          </table>
+        </div>
+
+        <p id="detailed-empty" class="empty-state">Aun no hay datos cargados para este filtro.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="./scripts/operations.js"></script>
+</body>
+</html>

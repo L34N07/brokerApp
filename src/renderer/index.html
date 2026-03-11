@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IOL Broker</title>
+  <link rel="stylesheet" href="./styles/common.css">
+  <link rel="stylesheet" href="./styles/index.css">
+</head>
+<body>
+  <main class="layout">
+    <section class="toolbar">
+      <div class="selection-bar" role="tablist" aria-label="Secciones">
+        <button id="btn-load-portfolio" class="selection-btn" type="button" role="tab" aria-selected="false">Portfafolio</button>
+        <button id="btn-load-account-status" class="selection-btn" type="button" role="tab" aria-selected="false">Cuenta</button>
+        <button id="btn-open-operations" class="selection-btn" type="button" role="tab" aria-selected="false">Operaciones</button>
+      </div>
+      <button id="btn-logout" class="logout-btn" type="button" aria-label="Cerrar sesión">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+          <path d="M16 17l5-5-5-5"></path>
+          <path d="M21 12H9"></path>
+        </svg>
+        Logout
+      </button>
+    </section>
+
+    <section id="data-grid" class="grid" hidden>
+      <section id="portfolio" class="panel"></section>
+      <section id="account-status" class="panel"></section>
+    </section>
+  </main>
+
+  <script src="./scripts/renderer.js"></script>
+</body>
+</html>

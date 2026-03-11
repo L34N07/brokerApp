@@ -110,47 +110,6 @@ function buildDefaultRequestFilters() {
 }
 
 function ensureToastNode() {
-  let styleNode = document.getElementById('broker-toast-style');
-  if (!styleNode) {
-    styleNode = document.createElement('style');
-    styleNode.id = 'broker-toast-style';
-    styleNode.textContent = `
-      .broker-toast {
-        position: fixed;
-        right: 16px;
-        bottom: 16px;
-        z-index: 9999;
-        max-width: min(460px, calc(100vw - 24px));
-        padding: 10px 12px;
-        border-radius: 10px;
-        border: 1px solid #dbe3df;
-        background: #f6f8f7;
-        color: #2c3a3f;
-        font-size: 0.9rem;
-        box-shadow: 0 12px 28px rgba(29, 49, 42, 0.18);
-        opacity: 0;
-        transform: translateY(8px);
-        pointer-events: none;
-        transition: opacity 120ms ease, transform 120ms ease;
-      }
-      .broker-toast.show {
-        opacity: 1;
-        transform: translateY(0);
-      }
-      .broker-toast.ok {
-        color: #1f6f53;
-        background: #e3f2eb;
-        border-color: #cde7db;
-      }
-      .broker-toast.error {
-        color: #8e2f3a;
-        background: #f9ecee;
-        border-color: #f2d4d8;
-      }
-    `;
-    document.head.appendChild(styleNode);
-  }
-
   if (!toastNode) {
     toastNode = document.createElement('div');
     toastNode.className = 'broker-toast';
@@ -524,6 +483,56 @@ function resolveOperationDateKey(row) {
   return formatDateISO(parsed);
 }
 
+function resolveOperationAmount(value, quantity = 0, price = 0) {
+  const amount = parseOperationNumber(value);
+  if (amount !== 0) {
+    return amount;
+  }
+  if (quantity > 0 && price > 0) {
+    return quantity * price;
+  }
+  return 0;
+}
+
+function resolveOperationQuantity(value, amount = 0, price = 0) {
+  const quantity = parseOperationNumber(value);
+  if (quantity !== 0) {
+    return quantity;
+  }
+  if (amount > 0 && price > 0) {
+    return amount / price;
+  }
+  return 0;
+}
+
+function splitPendingOperation(row) {
+  const orderPrice = Math.max(parseOperationNumber(row.precio), 0);
+  const totalAmountSeed = Math.max(parseOperationNumber(row.monto), 0);
+  const totalQuantity = Math.max(resolveOperationQuantity(row.cantidad, totalAmountSeed, orderPrice), 0);
+  const totalAmount = Math.max(resolveOperationAmount(row.monto, totalQuantity, orderPrice), 0);
+
+  const operatedPrice = Math.max(parseOperationNumber(firstDefined(row, ['precioOperado', 'precioPromedio'])), 0);
+  const operatedAmountSeed = Math.max(parseOperationNumber(row.montoOperado), 0);
+  const operatedQuantityRaw = Math.max(
+    resolveOperationQuantity(row.cantidadOperada, operatedAmountSeed, operatedPrice),
+    0
+  );
+  const operatedAmountRaw = Math.max(resolveOperationAmount(row.montoOperado, operatedQuantityRaw, operatedPrice), 0);
+
+  const operatedQuantity = totalQuantity > 0 ? Math.min(operatedQuantityRaw, totalQuantity) : operatedQuantityRaw;
+  const operatedAmount = totalAmount > 0 ? Math.min(operatedAmountRaw, totalAmount) : operatedAmountRaw;
+  const remainingQuantity = Math.max(totalQuantity - operatedQuantity, 0);
+  const remainingAmount = Math.max(totalAmount - operatedAmount, 0);
+
+  return {
+    orderPrice,
+    operatedAmount,
+    operatedQuantity,
+    remainingAmount,
+    remainingQuantity
+  };
+}
+
 function calculateTotalsByStatus(symbol, mode) {
   const rows = operationsBySymbol.get(symbol) || [];
   const now = nowLocal();
@@ -548,12 +557,27 @@ function calculateTotalsByStatus(symbol, mode) {
     }
 
     if (statusGroup === 'pendientes') {
-      totals.pendientes.cantidad += parseOperationNumber(row.cantidad);
-      totals.pendientes.monto += parseOperationNumber(row.monto);
+      const pendingSplit = splitPendingOperation(row);
+      const operationDateKey = resolveOperationDateKey(row);
 
-      const precioRaw = safeText(row.precio, '');
-      if (precioRaw) {
-        totals.pendientes.precioSum += parseOperationNumber(precioRaw);
+      if (pendingSplit.operatedQuantity > 0 || pendingSplit.operatedAmount > 0) {
+        if (operationDateKey === todayKey) {
+          totals.hoy.cantidadOperada += pendingSplit.operatedQuantity;
+          totals.hoy.montoOperado += pendingSplit.operatedAmount;
+        } else if (operationDateKey === previousBusinessDayKey) {
+          totals.diaPrevio.cantidadOperada += pendingSplit.operatedQuantity;
+          totals.diaPrevio.montoOperado += pendingSplit.operatedAmount;
+        }
+      }
+
+      totals.pendientes.cantidad += pendingSplit.remainingQuantity;
+      totals.pendientes.monto += pendingSplit.remainingAmount;
+
+      if (
+        (pendingSplit.remainingQuantity > 0 || pendingSplit.remainingAmount > 0) &&
+        pendingSplit.orderPrice > 0
+      ) {
+        totals.pendientes.precioSum += pendingSplit.orderPrice;
         totals.pendientes.precioCount += 1;
       }
       continue;

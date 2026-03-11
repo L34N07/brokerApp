@@ -2,6 +2,10 @@ const { app, BrowserWindow, ipcMain, Menu } = require('electron');
 const { spawn } = require('child_process');
 const path = require('path');
 
+const PRELOAD_PATH = path.join(__dirname, 'preload.js');
+const RENDERER_DIR = path.join(__dirname, '..', 'renderer');
+const BACKEND_SCRIPT_PATH = path.join(__dirname, '..', 'backend', 'script.py');
+
 let mainWindow = null;
 let loginWindow = null;
 let operationsWindow = null;
@@ -18,7 +22,7 @@ function getBackendRuntime() {
   const pythonBin = process.env.PYTHON_BIN || 'python3';
   return {
     command: pythonBin,
-    args: [path.join(__dirname, 'script.py')]
+    args: [BACKEND_SCRIPT_PATH]
   };
 }
 
@@ -112,14 +116,14 @@ function createMainWindow() {
     minWidth: 700,
     minHeight: 500,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false
     }
   });
 
   lockDownWindow(mainWindow);
-  mainWindow.loadFile('index.html');
+  mainWindow.loadFile(path.join(RENDERER_DIR, 'index.html'));
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -140,14 +144,14 @@ function createLoginWindow() {
     minWidth: 620,
     minHeight: 520,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false
     }
   });
 
   lockDownWindow(loginWindow);
-  loginWindow.loadFile('login.html');
+  loginWindow.loadFile(path.join(RENDERER_DIR, 'login.html'));
   loginWindow.on('closed', () => {
     loginWindow = null;
   });
@@ -166,14 +170,14 @@ function createOperationsWindow() {
     width: 1280,
     height: 860,
     webPreferences: {
-      preload: path.join(__dirname, 'preload.js'),
+      preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false
     }
   });
 
   lockDownWindow(operationsWindow);
-  operationsWindow.loadFile('operaciones.html');
+  operationsWindow.loadFile(path.join(RENDERER_DIR, 'operaciones.html'));
   operationsWindow.once('ready-to-show', () => {
     if (!operationsWindow || operationsWindow.isDestroyed()) {
       return;
@@ -231,11 +235,6 @@ ipcMain.handle('broker:get-operations', async (_event, filters) => {
 
 ipcMain.handle('broker:open-operations-window', () => {
   createOperationsWindow();
-  return { estado: 'ok' };
-});
-
-ipcMain.handle('broker:open-login-window', () => {
-  createLoginWindow();
   return { estado: 'ok' };
 });
 
