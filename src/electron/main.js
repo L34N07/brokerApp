@@ -1,14 +1,44 @@
 const { app, BrowserWindow, ipcMain, Menu } = require('electron');
 const { spawn } = require('child_process');
+const fs = require('fs');
 const path = require('path');
 
 const PRELOAD_PATH = path.join(__dirname, 'preload.js');
 const RENDERER_DIR = path.join(__dirname, '..', 'renderer');
+const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const BACKEND_SCRIPT_PATH = path.join(__dirname, '..', 'backend', 'script.py');
 
 let mainWindow = null;
 let loginWindow = null;
 let operationsWindow = null;
+
+function isExecutableFile(filePath) {
+  try {
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile()) {
+      return false;
+    }
+    return process.platform === 'win32' || Boolean(stats.mode & 0o111);
+  } catch (_error) {
+    return false;
+  }
+}
+
+function getPythonCommand() {
+  if (process.env.PYTHON_BIN) {
+    return process.env.PYTHON_BIN;
+  }
+
+  const venvPython = process.platform === 'win32'
+    ? path.join(PROJECT_ROOT, '.venv', 'Scripts', 'python.exe')
+    : path.join(PROJECT_ROOT, '.venv', 'bin', 'python');
+
+  if (isExecutableFile(venvPython)) {
+    return venvPython;
+  }
+
+  return process.platform === 'win32' ? 'python' : 'python3';
+}
 
 function getBackendRuntime() {
   if (app.isPackaged) {
@@ -19,9 +49,8 @@ function getBackendRuntime() {
     };
   }
 
-  const pythonBin = process.env.PYTHON_BIN || 'python3';
   return {
-    command: pythonBin,
+    command: getPythonCommand(),
     args: [BACKEND_SCRIPT_PATH]
   };
 }

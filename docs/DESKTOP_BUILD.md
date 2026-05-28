@@ -10,7 +10,7 @@
 
 This app now runs Python in two modes:
 
-- Development: runs `src/backend/script.py` with your local Python (`PYTHON_BIN` or `python3`).
+- Development: runs `src/backend/script.py` with `PYTHON_BIN`, `.venv`, or the system Python fallback.
 - Packaged app: runs a bundled backend binary from Electron resources (`broker-backend.exe` on Windows).
 
 ## 1) Install dependencies (PEP 668-safe)
@@ -36,13 +36,16 @@ That command does:
 - To generate a Windows installer (`.exe`), run the build on Windows.
 - `credentials.json` and `token.json` are excluded from packaged files.
 - Example local payloads live in `examples/`.
-- If `.venv` does not exist, run `npm run setup:python` first.
+- `.venv` is a local generated directory and is ignored by Git.
+- If `.venv` does not exist or is stale, run `npm run setup:python` first.
 
 ## Run on Linux (development)
 
 ```sh
-PYTHON_BIN=./.venv/bin/python npm start
+npm start
 ```
+
+Electron automatically uses `./.venv/bin/python` when it exists and is executable. Set `PYTHON_BIN` only when you want to force a different interpreter.
 
 ## Build Linux app with icon/double-click
 
