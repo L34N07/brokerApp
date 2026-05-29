@@ -46,6 +46,7 @@ let autoRefreshTimerSignature = '';
 let lastSummaryRefreshTime = null;
 let toastNode = null;
 let toastTimeoutId = null;
+const chartCardRegistry = new WeakMap();
 
 const integerNumberFormatter = new Intl.NumberFormat('es-AR', {
   maximumFractionDigits: 0
@@ -533,6 +534,19 @@ function splitPendingOperation(row) {
   };
 }
 
+function buildPendingOperationSummary(row, pendingSplit) {
+  return {
+    fecha: safeText(firstDefined(row, ['fechaOrden', 'fecha', 'fechaOperada'])),
+    estado: safeText(row.estado),
+    mercado: safeText(row.mercado),
+    cantidadPendiente: pendingSplit.remainingQuantity,
+    montoPendiente: pendingSplit.remainingAmount,
+    precio: pendingSplit.orderPrice,
+    cantidadOperada: pendingSplit.operatedQuantity,
+    montoOperado: pendingSplit.operatedAmount
+  };
+}
+
 function calculateTotalsByStatus(symbol, mode) {
   const rows = operationsBySymbol.get(symbol) || [];
   const now = nowLocal();
@@ -542,7 +556,7 @@ function calculateTotalsByStatus(symbol, mode) {
   const totals = {
     hoy: { cantidadOperada: 0, montoOperado: 0 },
     diaPrevio: { cantidadOperada: 0, montoOperado: 0 },
-    pendientes: { cantidad: 0, monto: 0, precioSum: 0, precioCount: 0 }
+    pendientes: { cantidad: 0, monto: 0, operaciones: [] }
   };
 
   for (const row of rows) {
@@ -573,12 +587,8 @@ function calculateTotalsByStatus(symbol, mode) {
       totals.pendientes.cantidad += pendingSplit.remainingQuantity;
       totals.pendientes.monto += pendingSplit.remainingAmount;
 
-      if (
-        (pendingSplit.remainingQuantity > 0 || pendingSplit.remainingAmount > 0) &&
-        pendingSplit.orderPrice > 0
-      ) {
-        totals.pendientes.precioSum += pendingSplit.orderPrice;
-        totals.pendientes.precioCount += 1;
+      if (pendingSplit.remainingQuantity > 0 || pendingSplit.remainingAmount > 0) {
+        totals.pendientes.operaciones.push(buildPendingOperationSummary(row, pendingSplit));
       }
       continue;
     }
@@ -616,6 +626,43 @@ function buildValueRow(values) {
   return row;
 }
 
+function buildPendingOperationsSummary(operations, summary = {}, priceLabel = 'PPC') {
+  if (!Array.isArray(operations) || operations.length === 0) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'pending-operations-list';
+    const empty = document.createElement('p');
+    empty.className = 'pending-operations-empty';
+    empty.textContent = 'No hay operaciones pendientes para mostrar.';
+    wrapper.appendChild(empty);
+    return wrapper;
+  }
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'pending-operations-list';
+
+  const pendingSummaryTable = buildSummaryTable(
+    ['Cant', 'Monto', priceLabel],
+    [[formatNumber(summary.cantidadTotal), formatNumber(summary.montoTotal), formatNumber(summary.precioPromedio)]]
+  );
+  pendingSummaryTable.classList.add('pending-total-table');
+
+  const pendingRows = operations.map((operation, index) => [
+    String(index + 1),
+    formatNumber(operation.cantidadOperada),
+    formatNumber(operation.cantidadPendiente),
+    formatNumber(operation.montoPendiente),
+    formatNumber(operation.precio)
+  ]);
+
+  const pendingTable = buildSummaryTable(['Op', 'Operadas', 'Cantidad', 'Monto', 'Precio'], pendingRows);
+  pendingTable.classList.add('pending-operations-table');
+
+  wrapper.appendChild(pendingSummaryTable);
+  wrapper.appendChild(pendingTable);
+
+  return wrapper;
+}
+
 function buildSummaryTable(headers, rows) {
   const table = document.createElement('table');
   table.className = 'summary-table';
@@ -631,15 +678,73 @@ function buildSummaryTable(headers, rows) {
   table.appendChild(thead);
 
   const tbody = document.createElement('tbody');
-  for (const rowValues of rows) {
-    tbody.appendChild(buildValueRow(rowValues));
+  for (const rowConfig of rows) {
+    const values = Array.isArray(rowConfig) ? rowConfig : rowConfig.values;
+    const row = buildValueRow(values);
+    const isExpandable = !Array.isArray(rowConfig) && rowConfig.expandable;
+
+    if (isExpandable) {
+      row.classList.add('summary-row-expandable');
+      const labelCell = row.firstElementChild;
+      if (labelCell) {
+        while (labelCell.firstChild) {
+          labelCell.removeChild(labelCell.firstChild);
+        }
+
+        const button = document.createElement('button');
+        button.className = 'summary-row-toggle';
+        button.type = 'button';
+        button.setAttribute('aria-expanded', String(Boolean(rowConfig.expanded)));
+        if (rowConfig.detailId) {
+          button.setAttribute('aria-controls', rowConfig.detailId);
+        }
+
+        const label = document.createElement('span');
+        label.className = 'summary-row-toggle-label';
+        label.textContent = values[0];
+        button.appendChild(label);
+
+        if (rowConfig.toggleMeta) {
+          const meta = document.createElement('span');
+          meta.className = 'summary-row-toggle-meta';
+          meta.textContent = rowConfig.toggleMeta;
+          button.appendChild(meta);
+        }
+
+        const icon = document.createElement('span');
+        icon.className = 'summary-row-toggle-icon';
+        icon.textContent = rowConfig.expanded ? '-' : '+';
+        button.appendChild(icon);
+
+        button.addEventListener('click', rowConfig.onToggle);
+        labelCell.appendChild(button);
+      }
+    }
+
+    tbody.appendChild(row);
+
+    if (isExpandable && rowConfig.expanded && rowConfig.detailNode) {
+      const detailRow = document.createElement('tr');
+      detailRow.className = 'summary-detail-row';
+
+      const detailCell = document.createElement('td');
+      detailCell.colSpan = headers.length;
+      detailCell.className = 'summary-detail-cell';
+      if (rowConfig.detailId) {
+        detailCell.id = rowConfig.detailId;
+      }
+      detailCell.appendChild(rowConfig.detailNode);
+      detailRow.appendChild(detailCell);
+
+      tbody.appendChild(detailRow);
+    }
   }
   table.appendChild(tbody);
 
   return table;
 }
 
-function renderChartContent(container, symbol, mode) {
+function renderChartContent(container, symbol, mode, options = {}) {
   while (container.firstChild) {
     container.removeChild(container.firstChild);
   }
@@ -654,8 +759,11 @@ function renderChartContent(container, symbol, mode) {
       ? totals.diaPrevio.montoOperado / totals.diaPrevio.cantidadOperada
       : 0;
   const pendingPrecioPromedio =
-    totals.pendientes.precioCount > 0 ? totals.pendientes.precioSum / totals.pendientes.precioCount : 0;
+    totals.pendientes.cantidad !== 0 ? totals.pendientes.monto / totals.pendientes.cantidad : 0;
+  const pendingOperations = totals.pendientes.operaciones;
   const priceLabel = mode === 'compra' ? 'PPC' : 'PPV';
+  const cardId = safeText(container.closest('.chart-card')?.dataset.chartId, '0');
+  const pendingDetailId = `summary-pending-${cardId}-${mode}`;
 
   const groups = document.createElement('div');
   groups.className = 'summary-groups';
@@ -663,24 +771,44 @@ function renderChartContent(container, symbol, mode) {
   const compactSummaryTable = buildSummaryTable(
     ['Periodo', 'Cant', 'Monto', priceLabel],
     [
-      [
-        'Hoy',
-        formatNumber(totals.hoy.cantidadOperada),
-        formatNumber(totals.hoy.montoOperado),
-        formatNumber(todayPpcOrPpv)
-      ],
-      [
-        'Dia Previo',
-        formatNumber(totals.diaPrevio.cantidadOperada),
-        formatNumber(totals.diaPrevio.montoOperado),
-        formatNumber(previousPpcOrPpv)
-      ],
-      [
-        'Pendientes',
-        formatNumber(totals.pendientes.cantidad),
-        formatNumber(totals.pendientes.monto),
-        formatNumber(pendingPrecioPromedio)
-      ]
+      {
+        values: [
+          'Hoy',
+          formatNumber(totals.hoy.cantidadOperada),
+          formatNumber(totals.hoy.montoOperado),
+          formatNumber(todayPpcOrPpv)
+        ]
+      },
+      {
+        values: [
+          'Dia Previo',
+          formatNumber(totals.diaPrevio.cantidadOperada),
+          formatNumber(totals.diaPrevio.montoOperado),
+          formatNumber(previousPpcOrPpv)
+        ]
+      },
+      {
+        values: [
+          'Pendientes',
+          formatNumber(totals.pendientes.cantidad),
+          formatNumber(totals.pendientes.monto),
+          formatNumber(pendingPrecioPromedio)
+        ],
+        expandable: pendingOperations.length > 0,
+        expanded: Boolean(options.pendingExpanded) && pendingOperations.length > 0,
+        detailId: pendingDetailId,
+        detailNode: buildPendingOperationsSummary(pendingOperations, {
+          cantidadTotal: totals.pendientes.cantidad,
+          montoTotal: totals.pendientes.monto,
+          precioPromedio: pendingPrecioPromedio
+        }, priceLabel),
+        toggleMeta: pendingOperations.length === 1 ? '1 op' : `${pendingOperations.length} ops`,
+        onToggle: () => {
+          if (typeof options.onPendingToggle === 'function') {
+            options.onPendingToggle();
+          }
+        }
+      }
     ]
   );
 
@@ -773,7 +901,8 @@ function createChartCard(defaultSymbol = '') {
   chartsGrid.insertBefore(card, gridAddZone);
 
   const state = {
-    mode: 'compra'
+    mode: 'compra',
+    pendingExpanded: false
   };
 
   const modeButtons = [compraButton, ventaButton];
@@ -781,16 +910,26 @@ function createChartCard(defaultSymbol = '') {
   const refreshCard = () => {
     const symbol = symbolSelect.value;
     setModeTabStyles(modeButtons, state.mode);
-    renderChartContent(content, symbol, state.mode);
+    renderChartContent(content, symbol, state.mode, {
+      pendingExpanded: state.pendingExpanded,
+      onPendingToggle: () => {
+        state.pendingExpanded = !state.pendingExpanded;
+        refreshCard();
+      }
+    });
   };
 
+  chartCardRegistry.set(card, { refreshCard, symbolSelect, state });
+
   symbolSelect.addEventListener('change', () => {
+    state.pendingExpanded = false;
     refreshCard();
   });
 
   for (const button of modeButtons) {
     button.addEventListener('click', () => {
       state.mode = button.dataset.mode;
+      state.pendingExpanded = false;
       refreshCard();
     });
   }
@@ -812,19 +951,16 @@ function syncExistingCardsWithNewData() {
   }
 
   for (const card of cards) {
-    const select = card.querySelector('.symbol-select');
-    const content = card.querySelector('.chart-content');
-    const modeButton = card.querySelector('.mode-tab.active');
-
-    const currentSymbol = select ? select.value : '';
-    const currentMode = modeButton ? modeButton.dataset.mode : 'compra';
-
-    if (select) {
-      buildSymbolOptions(select, currentSymbol);
+    const chart = chartCardRegistry.get(card);
+    if (chart?.symbolSelect && typeof chart.refreshCard === 'function') {
+      buildSymbolOptions(chart.symbolSelect, chart.symbolSelect.value);
+      chart.refreshCard();
+      continue;
     }
 
-    if (select && content) {
-      renderChartContent(content, select.value, currentMode);
+    const select = card.querySelector('.symbol-select');
+    if (select) {
+      buildSymbolOptions(select, select.value);
     }
   }
 
