@@ -57,7 +57,9 @@ DATA_DIR = get_data_dir()
 TOKEN_FILE = DATA_DIR / "token.json"
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
 DASHBOARD_LAYOUTS_FILE = DATA_DIR / "dashboard-layouts.json"
-DASHBOARD_LAYOUT_OBJECT_TYPES = {"summary", "tradingview", "flags"}
+DASHBOARD_LAYOUT_OBJECT_TYPES = {"summary", "tradingview", "flags", "portfolioActions"}
+SELL_ORDER_TYPES = {"precioLimite", "precioMercado"}
+SELL_ORDER_PLAZOS = {"t0", "t1", "t2"}
 
 
 def emit(payload):
@@ -102,6 +104,97 @@ def normalize_dashboard_layout_number(value, fallback=0):
     return number
 
 
+def normalize_positive_number(value, field_name):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise RuntimeError(f"{field_name} debe ser numérico.")
+    if number <= 0:
+        raise RuntimeError(f"{field_name} debe ser mayor a 0.")
+    return number
+
+
+def normalize_positive_integer(value, field_name):
+    number = normalize_positive_number(value, field_name)
+    rounded = int(round(number))
+    if rounded <= 0:
+        raise RuntimeError(f"{field_name} debe ser mayor a 0.")
+    return rounded
+
+
+def normalize_operation_number(value):
+    if isinstance(value, int):
+        if value <= 0:
+            raise RuntimeError("Número de operación inválido.")
+        return str(value)
+    if isinstance(value, float):
+        if value <= 0 or not value.is_integer():
+            raise RuntimeError("Número de operación inválido.")
+        return str(int(value))
+
+    text = str(value or "").strip()
+    if not text or not text.isdigit() or int(text) <= 0:
+        raise RuntimeError("Número de operación inválido.")
+    return text
+
+
+def normalize_sell_order_type(value):
+    order_type = str(value or "precioLimite").strip()
+    if order_type not in SELL_ORDER_TYPES:
+        raise RuntimeError("tipoOrden inválido para venta.")
+    return order_type
+
+
+def normalize_sell_order_plazo(value):
+    plazo = str(value or "t2").strip().lower()
+    if plazo not in SELL_ORDER_PLAZOS:
+        raise RuntimeError("Plazo inválido para venta.")
+    return plazo
+
+
+def format_default_order_validity(now_local=None):
+    now_local = now_local or datetime.now()
+    validity = now_local.replace(hour=23, minute=59, second=59, microsecond=0)
+    return validity.strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def normalize_sell_order_payload(payload, now_local=None):
+    if not isinstance(payload, dict):
+        raise RuntimeError("La orden de venta debe ser un objeto.")
+
+    raw_market = normalize_symbol_search_text(payload.get("mercado"))
+    if not raw_market:
+        raise RuntimeError("Debes indicar un mercado para vender.")
+    market = normalize_symbol_search_market(resolve_symbol_market(raw_market))
+    symbol = normalize_symbol_search_text(payload.get("simbolo")).upper()
+    if not symbol:
+        raise RuntimeError("Debes indicar un símbolo para vender.")
+
+    order_type = normalize_sell_order_type(payload.get("tipoOrden"))
+    quantity = normalize_positive_integer(payload.get("cantidad"), "cantidad")
+    if order_type == "precioLimite":
+        price = normalize_positive_number(payload.get("precio"), "precio")
+    else:
+        try:
+            price = float(payload.get("precio") or 0)
+        except (TypeError, ValueError):
+            raise RuntimeError("precio debe ser numérico.")
+        if price < 0:
+            raise RuntimeError("precio no puede ser negativo.")
+
+    validity = normalize_symbol_search_text(payload.get("validez")) or format_default_order_validity(now_local)
+
+    return {
+        "mercado": market,
+        "simbolo": symbol,
+        "tipoOrden": order_type,
+        "cantidad": quantity,
+        "precio": price,
+        "plazo": normalize_sell_order_plazo(payload.get("plazo")),
+        "validez": validity,
+    }
+
+
 def normalize_dashboard_layout_item(item):
     if not isinstance(item, dict):
         return None
@@ -142,7 +235,10 @@ def load_dashboard_layout_store():
     layouts = raw.get("layouts") if isinstance(raw, dict) else {}
     if not isinstance(layouts, dict):
         layouts = {}
-    return {"layouts": layouts}
+    last_layout_name = str(raw.get("last_layout_name") or "").strip() if isinstance(raw, dict) else ""
+    if last_layout_name not in layouts:
+        last_layout_name = ""
+    return {"layouts": layouts, "last_layout_name": last_layout_name}
 
 
 def save_dashboard_layout(name, layout):
@@ -154,8 +250,30 @@ def save_dashboard_layout(name, layout):
         "items": normalized_layout.get("items", []),
     }
     store["layouts"][name] = stored_layout
+    store["last_layout_name"] = name
     save_json_file(DASHBOARD_LAYOUTS_FILE, store)
     return stored_layout
+
+
+def mark_dashboard_layout_used(name):
+    normalized_name = normalize_dashboard_layout_name(name)
+    store = load_dashboard_layout_store()
+    if normalized_name not in store["layouts"]:
+        raise RuntimeError(f"No existe un diseño guardado con el nombre '{normalized_name}'.")
+    store["last_layout_name"] = normalized_name
+    save_json_file(DASHBOARD_LAYOUTS_FILE, store)
+
+
+def delete_dashboard_layout(name):
+    normalized_name = normalize_dashboard_layout_name(name)
+    store = load_dashboard_layout_store()
+    if normalized_name not in store["layouts"]:
+        raise RuntimeError(f"No existe un diseño guardado con el nombre '{normalized_name}'.")
+    del store["layouts"][normalized_name]
+    if store.get("last_layout_name") == normalized_name:
+        store["last_layout_name"] = ""
+    save_json_file(DASHBOARD_LAYOUTS_FILE, store)
+    return normalized_name
 
 
 def get_dashboard_layout(name):
@@ -164,6 +282,25 @@ def get_dashboard_layout(name):
     if not isinstance(layout, dict):
         raise RuntimeError(f"No existe un diseño guardado con el nombre '{name}'.")
     return normalize_dashboard_layout_payload(layout)
+
+
+def list_dashboard_layouts():
+    store = load_dashboard_layout_store()
+    layouts = []
+    for name, layout in store["layouts"].items():
+        if not isinstance(layout, dict):
+            continue
+        layouts.append(
+            {
+                "name": str(layout.get("name") or name),
+                "objectCount": len(layout.get("items") or []),
+            }
+        )
+    return sorted(layouts, key=lambda item: item["name"].lower())
+
+
+def get_last_dashboard_layout_name():
+    return load_dashboard_layout_store().get("last_layout_name") or ""
 
 
 def normalize_username(value):
@@ -860,6 +997,35 @@ def get_quote_flags(access_token, market, symbol):
     return normalize_quote_flags_payload(response.json(), normalized_market, normalized_symbol)
 
 
+def post_sell_order(access_token, order_payload):
+    order = normalize_sell_order_payload(order_payload)
+    response = requests.post(
+        f"{BASE_URL}/api/v2/operar/Vender",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json=order,
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    try:
+        return response.json()
+    except ValueError:
+        return {"raw": response.text}
+
+
+def delete_operation(access_token, operation_number):
+    normalized_number = normalize_operation_number(operation_number)
+    response = requests.delete(
+        f"{BASE_URL}/api/v2/operaciones/{normalized_number}",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    try:
+        return response.json()
+    except ValueError:
+        return {"raw": response.text}
+
+
 def map_currency_symbol(moneda):
     currency = str(moneda or "").strip().lower()
     if "peso" in currency and "argent" in currency:
@@ -1492,6 +1658,90 @@ def fetch_quote_flags(payload):
         )
 
 
+def fetch_sell_order(payload):
+    payload = payload or {}
+    try:
+        order_payload = normalize_sell_order_payload(payload)
+    except RuntimeError as exc:
+        emit({"estado": "error", "mensaje": str(exc)})
+        return
+
+    target_username = normalize_username(payload.get("username"))
+    try:
+        access_token, source = get_access_token(target_username)
+    except Exception as exc:
+        emit(
+            {
+                "estado": "desconectado",
+                "mensaje": f"No se pudo obtener un token válido: {exc}",
+            }
+        )
+        return
+
+    try:
+        response = post_sell_order(access_token, order_payload)
+        emit(
+            {
+                "estado": "ok",
+                "mensaje": "Orden de venta enviada.",
+                "token_source": source,
+                "orden": response,
+            }
+        )
+    except RuntimeError as exc:
+        emit({"estado": "error", "mensaje": str(exc)})
+    except requests.exceptions.RequestException as exc:
+        emit(
+            {
+                "estado": "error",
+                "mensaje": f"Error al enviar orden de venta: {exc}",
+            }
+        )
+
+
+def fetch_cancel_operation(payload):
+    payload = payload or {}
+    try:
+        operation_number = normalize_operation_number(payload.get("numeroOperacion") or payload.get("numero"))
+    except RuntimeError as exc:
+        emit({"estado": "error", "mensaje": str(exc)})
+        return
+
+    target_username = normalize_username(payload.get("username"))
+    try:
+        access_token, source = get_access_token(target_username)
+    except Exception as exc:
+        emit(
+            {
+                "estado": "desconectado",
+                "mensaje": f"No se pudo obtener un token válido: {exc}",
+            }
+        )
+        return
+
+    try:
+        response = delete_operation(access_token, operation_number)
+        emit(
+            {
+                "estado": "ok",
+                "mensaje": "Operación cancelada.",
+                "token_source": source,
+                "numeroOperacion": operation_number,
+                "operacion": response,
+            }
+        )
+    except RuntimeError as exc:
+        emit({"estado": "error", "mensaje": str(exc)})
+    except requests.exceptions.RequestException as exc:
+        emit(
+            {
+                "estado": "error",
+                "mensaje": f"Error al cancelar operación: {exc}",
+                "numeroOperacion": operation_number,
+            }
+        )
+
+
 def fetch_save_dashboard_layout(payload):
     payload = payload or {}
     try:
@@ -1516,6 +1766,7 @@ def fetch_load_dashboard_layout(payload):
     try:
         name = normalize_dashboard_layout_name(payload.get("name"))
         layout = get_dashboard_layout(name)
+        mark_dashboard_layout_used(name)
     except RuntimeError as exc:
         emit({"estado": "error", "mensaje": str(exc)})
         return
@@ -1525,6 +1776,43 @@ def fetch_load_dashboard_layout(payload):
             "estado": "ok",
             "name": name,
             "layout": layout,
+        }
+    )
+
+
+def fetch_list_dashboard_layouts(payload=None):
+    payload = payload or {}
+    last_layout_name = get_last_dashboard_layout_name()
+    response = {
+        "estado": "ok",
+        "layouts": list_dashboard_layouts(),
+        "lastLayoutName": last_layout_name,
+    }
+
+    if payload.get("includeLastLayout") and last_layout_name:
+        try:
+            response["lastLayout"] = get_dashboard_layout(last_layout_name)
+        except RuntimeError:
+            response["lastLayout"] = None
+
+    emit(response)
+
+
+def fetch_delete_dashboard_layout(payload):
+    payload = payload or {}
+    try:
+        name = delete_dashboard_layout(payload.get("name"))
+    except RuntimeError as exc:
+        emit({"estado": "error", "mensaje": str(exc)})
+        return
+
+    emit(
+        {
+            "estado": "ok",
+            "mensaje": f"Diseño borrado: {name}.",
+            "name": name,
+            "layouts": list_dashboard_layouts(),
+            "lastLayoutName": get_last_dashboard_layout_name(),
         }
     )
 
@@ -1736,11 +2024,23 @@ def main():
     if command == "quote-flags":
         fetch_quote_flags(payload)
         return
+    if command == "sell-order":
+        fetch_sell_order(payload)
+        return
+    if command == "cancel-operation":
+        fetch_cancel_operation(payload)
+        return
     if command == "save-dashboard-layout":
         fetch_save_dashboard_layout(payload)
         return
     if command == "load-dashboard-layout":
         fetch_load_dashboard_layout(payload)
+        return
+    if command == "list-dashboard-layouts":
+        fetch_list_dashboard_layouts(payload)
+        return
+    if command == "delete-dashboard-layout":
+        fetch_delete_dashboard_layout(payload)
         return
     if command == "list-accounts":
         list_accounts()

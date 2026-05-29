@@ -436,6 +436,109 @@ class ScriptSymbolSearchTests(unittest.TestCase):
         self.assertIn("/api/v2/bCBA/Titulos/ALUA/CotizacionDetalle", mock_get.call_args.args[0])
         self.assertEqual(mock_get.call_args.kwargs["headers"]["Authorization"], "Bearer token")
 
+    def test_normalize_sell_order_payload_uses_limit_order_shape(self):
+        result = script.normalize_sell_order_payload(
+            {
+                "mercado": "1",
+                "simbolo": " alua ",
+                "cantidad": 7.6,
+                "precio": "107",
+            },
+            now_local=datetime(2026, 5, 29, 10, 12, 0),
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "mercado": "bCBA",
+                "simbolo": "ALUA",
+                "tipoOrden": "precioLimite",
+                "cantidad": 8,
+                "precio": 107.0,
+                "plazo": "t2",
+                "validez": "2026-05-29T23:59:59.000Z",
+            },
+        )
+
+    def test_normalize_sell_order_payload_requires_market(self):
+        with self.assertRaises(RuntimeError):
+            script.normalize_sell_order_payload(
+                {
+                    "simbolo": "ALUA",
+                    "cantidad": 1,
+                    "precio": 100,
+                }
+            )
+
+    def test_normalize_operation_number_rejects_non_numeric_values(self):
+        self.assertEqual(script.normalize_operation_number("00123"), "00123")
+        self.assertEqual(script.normalize_operation_number(123), "123")
+        with self.assertRaises(RuntimeError):
+            script.normalize_operation_number("ABC123")
+
+    @patch("script.requests.post")
+    def test_post_sell_order_calls_operar_vender_endpoint(self, mock_post):
+        class Response:
+            text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"numeroOperacion": 123}
+
+        mock_post.return_value = Response()
+
+        result = script.post_sell_order(
+            "token",
+            {
+                "mercado": "bCBA",
+                "simbolo": "ALUA",
+                "tipoOrden": "precioLimite",
+                "cantidad": 4,
+                "precio": 110,
+                "plazo": "t0",
+                "validez": "2026-05-29T23:59:59.000Z",
+            },
+        )
+
+        self.assertEqual(result["numeroOperacion"], 123)
+        mock_post.assert_called_once()
+        self.assertIn("/api/v2/operar/Vender", mock_post.call_args.args[0])
+        self.assertEqual(mock_post.call_args.kwargs["headers"]["Authorization"], "Bearer token")
+        self.assertEqual(
+            mock_post.call_args.kwargs["json"],
+            {
+                "mercado": "bCBA",
+                "simbolo": "ALUA",
+                "tipoOrden": "precioLimite",
+                "cantidad": 4,
+                "precio": 110.0,
+                "plazo": "t0",
+                "validez": "2026-05-29T23:59:59.000Z",
+            },
+        )
+
+    @patch("script.requests.delete")
+    def test_delete_operation_calls_operaciones_endpoint(self, mock_delete):
+        class Response:
+            text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"estado": "cancelada"}
+
+        mock_delete.return_value = Response()
+
+        result = script.delete_operation("token", "123456")
+
+        self.assertEqual(result["estado"], "cancelada")
+        mock_delete.assert_called_once()
+        self.assertIn("/api/v2/operaciones/123456", mock_delete.call_args.args[0])
+        self.assertEqual(mock_delete.call_args.kwargs["headers"]["Authorization"], "Bearer token")
+
     def test_normalize_dashboard_layout_payload_keeps_only_layout_fields(self):
         result = script.normalize_dashboard_layout_payload(
             {
@@ -451,16 +554,19 @@ class ScriptSymbolSearchTests(unittest.TestCase):
                         "operations": [{"simbolo": "NVDA"}],
                     },
                     {"type": "unsupported", "x": 1},
+                    {"type": "portfolioActions", "x": 2, "y": 3, "width": 520, "height": 220, "selectedStock": "ALUA"},
                 ]
             }
         )
 
-        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(len(result["items"]), 2)
         self.assertEqual(result["items"][0]["type"], "summary")
         self.assertEqual(result["items"][0]["x"], 12)
         self.assertEqual(result["items"][0]["zIndex"], 4)
         self.assertNotIn("selectedSymbol", result["items"][0])
         self.assertNotIn("operations", result["items"][0])
+        self.assertEqual(result["items"][1]["type"], "portfolioActions")
+        self.assertNotIn("selectedStock", result["items"][1])
 
     def test_save_and_load_dashboard_layout_uses_layout_file(self):
         previous_file = script.DASHBOARD_LAYOUTS_FILE
@@ -485,12 +591,80 @@ class ScriptSymbolSearchTests(unittest.TestCase):
                 )
 
                 loaded = script.get_dashboard_layout("Mesa")
+                last_layout_name = script.get_last_dashboard_layout_name()
             finally:
                 script.DASHBOARD_LAYOUTS_FILE = previous_file
 
         self.assertEqual(loaded["items"][0]["type"], "flags")
         self.assertEqual(loaded["items"][0]["width"], 360)
         self.assertEqual(loaded["items"][0]["zIndex"], 9)
+        self.assertEqual(last_layout_name, "Mesa")
+
+    def test_mark_dashboard_layout_used_tracks_last_loaded_layout(self):
+        previous_file = script.DASHBOARD_LAYOUTS_FILE
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script.DASHBOARD_LAYOUTS_FILE = Path(temp_dir) / "dashboard-layouts.json"
+            try:
+                script.save_dashboard_layout("Mesa A", {"items": [{"type": "summary"}]})
+                script.save_dashboard_layout("Mesa B", {"items": [{"type": "flags"}]})
+                script.mark_dashboard_layout_used("Mesa A")
+                last_layout_name = script.get_last_dashboard_layout_name()
+            finally:
+                script.DASHBOARD_LAYOUTS_FILE = previous_file
+
+        self.assertEqual(last_layout_name, "Mesa A")
+
+    def test_delete_dashboard_layout_removes_saved_layout_and_last_used(self):
+        previous_file = script.DASHBOARD_LAYOUTS_FILE
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script.DASHBOARD_LAYOUTS_FILE = Path(temp_dir) / "dashboard-layouts.json"
+            try:
+                script.save_dashboard_layout("Mesa A", {"items": [{"type": "summary"}]})
+                script.save_dashboard_layout("Mesa B", {"items": [{"type": "flags"}]})
+                deleted_name = script.delete_dashboard_layout("Mesa B")
+                layouts = script.list_dashboard_layouts()
+                last_layout_name = script.get_last_dashboard_layout_name()
+            finally:
+                script.DASHBOARD_LAYOUTS_FILE = previous_file
+
+        self.assertEqual(deleted_name, "Mesa B")
+        self.assertEqual([layout["name"] for layout in layouts], ["Mesa A"])
+        self.assertEqual(last_layout_name, "")
+
+    def test_list_dashboard_layouts_sorts_and_counts_items(self):
+        previous_file = script.DASHBOARD_LAYOUTS_FILE
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script.DASHBOARD_LAYOUTS_FILE = Path(temp_dir) / "dashboard-layouts.json"
+            try:
+                script.save_dashboard_layout("B", {"items": [{"type": "summary"}]})
+                script.save_dashboard_layout(
+                    "A",
+                    {"items": [{"type": "flags"}, {"type": "portfolioActions"}]},
+                )
+                layouts = script.list_dashboard_layouts()
+            finally:
+                script.DASHBOARD_LAYOUTS_FILE = previous_file
+
+        self.assertEqual([layout["name"] for layout in layouts], ["A", "B"])
+        self.assertEqual(layouts[0]["objectCount"], 2)
+
+    def test_fetch_list_dashboard_layouts_can_include_last_layout_payload(self):
+        previous_file = script.DASHBOARD_LAYOUTS_FILE
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script.DASHBOARD_LAYOUTS_FILE = Path(temp_dir) / "dashboard-layouts.json"
+            try:
+                script.save_dashboard_layout(
+                    "Mesa",
+                    {"items": [{"type": "portfolioActions", "x": 10, "y": 20, "width": 520, "height": 190}]},
+                )
+                with patch("script.emit") as mock_emit:
+                    script.fetch_list_dashboard_layouts({"includeLastLayout": True})
+            finally:
+                script.DASHBOARD_LAYOUTS_FILE = previous_file
+
+        payload = mock_emit.call_args.args[0]
+        self.assertEqual(payload["lastLayoutName"], "Mesa")
+        self.assertEqual(payload["lastLayout"]["items"][0]["type"], "portfolioActions")
 
     @patch("script.get_quote_symbols")
     @patch("script.get_quote_instruments")

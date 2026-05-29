@@ -6,23 +6,34 @@ const panelToggleButton = document.getElementById('btn-toggle-dashboard-panel');
 const layoutNameInput = document.getElementById('dashboard-layout-name');
 const saveLayoutButton = document.getElementById('btn-save-dashboard-layout');
 const loadLayoutButton = document.getElementById('btn-load-dashboard-layout');
+const deleteLayoutButton = document.getElementById('btn-delete-dashboard-layout');
+const layoutSelect = document.getElementById('dashboard-layout-select');
 const paletteItems = Array.from(document.querySelectorAll('[data-dashboard-object-type]'));
 
 const SUMMARY_REFRESH_INTERVALS = [20, 30, 60, 120, 300];
 const FLAGS_REFRESH_INTERVALS = [10, 20, 30, 60, 120, 300];
+const PORTFOLIO_REFRESH_INTERVALS = [10, 20, 30, 60, 120, 300];
 const FLAGS_DEPTH_LEVEL_LIMIT = 6;
 const TRADINGVIEW_WIDGET_SCRIPT_URL = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
 const DEFAULT_TRADINGVIEW_SYMBOL = 'NASDAQ:AAPL';
+const DASHBOARD_CACHE_TTLS_MS = {
+  operations: 3000,
+  portfolio: 3000,
+  quoteFlags: 1800,
+  priceStep: 5 * 60 * 1000,
+  priceStepError: 30000
+};
+const DASHBOARD_PRICE_STEP_CONCURRENCY = 4;
 const DASHBOARD_OBJECT_TYPES = {
   summary: {
-    label: 'Resumen operaciones',
+    label: 'Resumen de operaciones',
     width: 340,
     height: 240,
     minWidth: 280,
     minHeight: 170
   },
   tradingview: {
-    label: 'TradingView',
+    label: 'Panel de TradingView',
     width: 540,
     height: 330,
     minWidth: 360,
@@ -31,9 +42,16 @@ const DASHBOARD_OBJECT_TYPES = {
   flags: {
     label: 'Puntas compra/venta',
     width: 360,
-    height: 250,
+    height: 220,
     minWidth: 300,
-    minHeight: 180
+    minHeight: 150
+  },
+  portfolioActions: {
+    label: 'Acciones de portafolio',
+    width: 620,
+    height: 190,
+    minWidth: 520,
+    minHeight: 145
   }
 };
 
@@ -43,6 +61,7 @@ let dashboardItemIdCounter = 0;
 let dashboardLayerCounter = 1;
 let lastSummaryRefreshInterval = 60;
 let lastFlagsRefreshInterval = 60;
+let lastPortfolioRefreshInterval = 60;
 let summaryOperations = [];
 let operationsBySymbol = new Map();
 let availableOperationSymbols = [];
@@ -51,6 +70,24 @@ let pointerAction = null;
 let draggedPaletteType = '';
 let toastNode = null;
 let toastTimeoutId = null;
+let activeConfirmDialog = null;
+let lastDashboardLayoutName = '';
+let autoLoadedLastLayout = false;
+let activeAccountRefreshRequestId = 0;
+
+const dashboardRequestCache = new Map();
+const dashboardInflightRequests = new Map();
+const dashboardCacheVersions = new Map();
+const portfolioPriceStepCache = new Map();
+
+const dashboardPerfEnabled = (() => {
+  try {
+    return window.localStorage?.getItem('brokerDashboardPerf') === '1'
+      || new URLSearchParams(window.location.search).has('dashboardPerf');
+  } catch (_error) {
+    return false;
+  }
+})();
 
 const integerNumberFormatter = new Intl.NumberFormat('es-AR', {
   maximumFractionDigits: 0
@@ -59,6 +96,209 @@ const decimalNumberFormatter = new Intl.NumberFormat('es-AR', {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2
 });
+
+function getPerfNow() {
+  return typeof performance !== 'undefined' && typeof performance.now === 'function'
+    ? performance.now()
+    : Date.now();
+}
+
+function startDashboardPerf(label, details = {}) {
+  if (!dashboardPerfEnabled) {
+    return null;
+  }
+  return {
+    label,
+    details,
+    startedAt: getPerfNow()
+  };
+}
+
+function finishDashboardPerf(timer, details = {}) {
+  if (!timer) {
+    return;
+  }
+  const elapsed = Math.round((getPerfNow() - timer.startedAt) * 10) / 10;
+  console.debug('[dashboard:perf]', timer.label, `${elapsed}ms`, {
+    ...timer.details,
+    ...details
+  });
+}
+
+function stableStringify(value) {
+  if (value === null || typeof value !== 'object') {
+    return JSON.stringify(value);
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+
+  const keys = Object.keys(value).sort();
+  return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+}
+
+function getDashboardCacheNamespace(key) {
+  return String(key).split(':')[0] || String(key);
+}
+
+function getDashboardCacheVersion(namespace) {
+  return dashboardCacheVersions.get(namespace) || 0;
+}
+
+function invalidateDashboardCache(namespace) {
+  dashboardCacheVersions.set(namespace, getDashboardCacheVersion(namespace) + 1);
+  for (const key of Array.from(dashboardRequestCache.keys())) {
+    if (getDashboardCacheNamespace(key) === namespace) {
+      dashboardRequestCache.delete(key);
+    }
+  }
+}
+
+async function getCachedDashboardResource(key, requestFactory, options = {}) {
+  const ttlMs = Math.max(Number(options.ttlMs) || 0, 0);
+  const now = Date.now();
+  const cached = dashboardRequestCache.get(key);
+  const namespace = getDashboardCacheNamespace(key);
+  const cacheVersion = getDashboardCacheVersion(namespace);
+
+  if (!options.force && cached && now - cached.cachedAt <= ttlMs) {
+    return cached.value;
+  }
+
+  const inflight = dashboardInflightRequests.get(key);
+  if (inflight && inflight.version === cacheVersion) {
+    return inflight.promise;
+  }
+
+  const perf = startDashboardPerf(`request:${namespace}`, { key });
+  const request = Promise.resolve()
+    .then(requestFactory)
+    .then((value) => {
+      if (getDashboardCacheVersion(namespace) === cacheVersion) {
+        dashboardRequestCache.set(key, {
+          cachedAt: Date.now(),
+          value
+        });
+      }
+      finishDashboardPerf(perf, { cached: false });
+      return value;
+    })
+    .catch((error) => {
+      finishDashboardPerf(perf, { error: error.message || String(error) });
+      throw error;
+    })
+    .finally(() => {
+      if (dashboardInflightRequests.get(key)?.promise === request) {
+        dashboardInflightRequests.delete(key);
+      }
+    });
+
+  dashboardInflightRequests.set(key, {
+    promise: request,
+    version: cacheVersion
+  });
+  return request;
+}
+
+function getDashboardPortfolio(options = {}) {
+  return getCachedDashboardResource('portfolio:active', async () => ({
+    response: await window.apiBroker.getPortfolio(),
+    refreshedAt: nowLocal()
+  }), {
+    ttlMs: DASHBOARD_CACHE_TTLS_MS.portfolio,
+    force: Boolean(options.force)
+  });
+}
+
+function getDashboardOperations(options = {}) {
+  return getCachedDashboardResource('operations:default', async () => {
+    const filters = buildDefaultRequestFilters();
+    return {
+      filters,
+      response: await window.apiBroker.getOperations(filters),
+      refreshedAt: nowLocal()
+    };
+  }, {
+    ttlMs: DASHBOARD_CACHE_TTLS_MS.operations,
+    force: Boolean(options.force)
+  });
+}
+
+function buildQuoteFlagsCacheKey(payload) {
+  return `quoteFlags:${stableStringify({
+    mercado: safeText(payload?.mercado, '').toLowerCase(),
+    simbolo: safeText(payload?.simbolo, '').toUpperCase()
+  })}`;
+}
+
+function getPortfolioPriceStepCacheKey(market, symbol) {
+  return `${safeText(market, '').toLowerCase()}::${safeText(symbol, '').toUpperCase()}`;
+}
+
+function readPortfolioPriceStepCache(market, symbol) {
+  const key = getPortfolioPriceStepCacheKey(market, symbol);
+  const cached = portfolioPriceStepCache.get(key);
+  if (!cached || cached.expiresAt <= Date.now()) {
+    portfolioPriceStepCache.delete(key);
+    return null;
+  }
+  return cached;
+}
+
+function writePortfolioPriceStepCache(market, symbol, step, error = '') {
+  const hasStep = Number.isFinite(step) && step > 0;
+  portfolioPriceStepCache.set(getPortfolioPriceStepCacheKey(market, symbol), {
+    step: hasStep ? step : null,
+    error: hasStep ? '' : error,
+    expiresAt: Date.now() + (hasStep ? DASHBOARD_CACHE_TTLS_MS.priceStep : DASHBOARD_CACHE_TTLS_MS.priceStepError)
+  });
+}
+
+function applyCachedPriceStepToRow(row) {
+  const cached = readPortfolioPriceStepCache(row.market, row.symbol);
+  if (!cached) {
+    return false;
+  }
+  row.priceStep = cached.step;
+  row.priceStepError = cached.step ? '' : cached.error || 'Incremento no disponible';
+  return true;
+}
+
+function getDashboardQuoteFlags(payload, options = {}) {
+  const requestPayload = {
+    mercado: payload?.mercado,
+    simbolo: payload?.simbolo
+  };
+  return getCachedDashboardResource(buildQuoteFlagsCacheKey(requestPayload), async () => {
+    const response = await window.apiBroker.getQuoteFlags(requestPayload);
+    if (response?.estado === 'ok' && response.cotizacion) {
+      const step = derivePriceStepFromPrices(collectQuotePrices(response.cotizacion));
+      writePortfolioPriceStepCache(requestPayload.mercado, requestPayload.simbolo, step, step ? '' : 'Incremento no disponible');
+    }
+    return {
+      response,
+      refreshedAt: nowLocal()
+    };
+  }, {
+    ttlMs: DASHBOARD_CACHE_TTLS_MS.quoteFlags,
+    force: Boolean(options.force)
+  });
+}
+
+async function runWithConcurrency(items, limit, worker) {
+  const results = [];
+  let nextIndex = 0;
+  const workerCount = Math.min(Math.max(limit, 1), items.length);
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex;
+      nextIndex += 1;
+      results[index] = await worker(items[index], index);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
 
 function safeText(value, fallback = '-') {
   if (value === null || value === undefined) {
@@ -158,6 +398,9 @@ function getRefreshIntervalsForType(type) {
   if (type === 'flags') {
     return FLAGS_REFRESH_INTERVALS;
   }
+  if (type === 'portfolioActions') {
+    return PORTFOLIO_REFRESH_INTERVALS;
+  }
   return SUMMARY_REFRESH_INTERVALS;
 }
 
@@ -167,6 +410,9 @@ function getDefaultRefreshIntervalForType(type) {
   }
   if (type === 'flags') {
     return lastFlagsRefreshInterval;
+  }
+  if (type === 'portfolioActions') {
+    return lastPortfolioRefreshInterval;
   }
   return null;
 }
@@ -197,6 +443,100 @@ function setStatus(message, tone = 'neutral', options = {}) {
   toastTimeoutId = setTimeout(() => {
     node.classList.remove('show');
   }, 2200);
+}
+
+function closeActiveConfirmDialog(result = false) {
+  if (!activeConfirmDialog) {
+    return;
+  }
+
+  const { overlay, resolve, previousFocus } = activeConfirmDialog;
+  activeConfirmDialog = null;
+  overlay.remove();
+  if (previousFocus && typeof previousFocus.focus === 'function') {
+    previousFocus.focus();
+  }
+  resolve(result);
+}
+
+function showDashboardConfirmDialog({ title, message, details = '', confirmLabel = 'Confirmar', cancelLabel = 'Cancelar' }) {
+  if (activeConfirmDialog) {
+    closeActiveConfirmDialog(false);
+  }
+
+  return new Promise((resolve) => {
+    const previousFocus = document.activeElement;
+    const overlay = document.createElement('div');
+    overlay.className = 'dashboard-confirm-overlay';
+    overlay.setAttribute('role', 'presentation');
+
+    const dialog = document.createElement('section');
+    dialog.className = 'dashboard-confirm-dialog';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-labelledby', 'dashboard-confirm-title');
+    dialog.tabIndex = -1;
+
+    const heading = document.createElement('h2');
+    heading.id = 'dashboard-confirm-title';
+    heading.textContent = title;
+
+    const body = document.createElement('p');
+    body.className = 'dashboard-confirm-message';
+    body.textContent = message;
+
+    dialog.appendChild(heading);
+    dialog.appendChild(body);
+
+    if (details) {
+      const detail = document.createElement('p');
+      detail.className = 'dashboard-confirm-detail';
+      detail.textContent = details;
+      dialog.appendChild(detail);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'dashboard-confirm-actions';
+
+    const cancelButton = document.createElement('button');
+    cancelButton.type = 'button';
+    cancelButton.className = 'dashboard-confirm-btn secondary';
+    cancelButton.textContent = cancelLabel;
+    cancelButton.addEventListener('click', () => {
+      closeActiveConfirmDialog(false);
+    });
+
+    const confirmButton = document.createElement('button');
+    confirmButton.type = 'button';
+    confirmButton.className = 'dashboard-confirm-btn primary';
+    confirmButton.textContent = confirmLabel;
+    confirmButton.addEventListener('click', () => {
+      closeActiveConfirmDialog(true);
+    });
+
+    actions.appendChild(cancelButton);
+    actions.appendChild(confirmButton);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+
+    overlay.addEventListener('mousedown', (event) => {
+      if (event.target === overlay) {
+        closeActiveConfirmDialog(false);
+      }
+    });
+    overlay.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeActiveConfirmDialog(false);
+      }
+    });
+
+    activeConfirmDialog = { overlay, resolve, previousFocus };
+    document.body.appendChild(overlay);
+    requestAnimationFrame(() => {
+      dialog.focus();
+    });
+  });
 }
 
 function setPaletteEnabled(enabled) {
@@ -251,6 +591,11 @@ function normalizeStockMarket(value) {
   return safeText(value, '');
 }
 
+function normalizeSellOrderPlazo(value) {
+  const plazo = safeText(value, '').toLowerCase();
+  return ['t0', 't1', 't2'].includes(plazo) ? plazo : 't2';
+}
+
 function buildStockOptionKey(symbol, market) {
   return `${safeText(market, '').toLowerCase()}::${safeText(symbol, '').toUpperCase()}`;
 }
@@ -301,7 +646,7 @@ function buildPortfolioStockOptions(portfolio) {
       market,
       label,
       source: 'portfolio',
-      sourceLabel: 'Portfolio',
+      sourceLabel: 'Portafolio',
     });
   }
 
@@ -357,6 +702,181 @@ function mergeStockOptions(optionGroups) {
     }
     return safeText(a.market, '').localeCompare(safeText(b.market, ''));
   });
+}
+
+function normalizePortfolioActionRow(activo) {
+  const titulo = activo?.titulo || {};
+  const symbol = firstNonEmpty([titulo.simbolo, activo?.simbolo]).toUpperCase();
+  if (!symbol) {
+    return null;
+  }
+
+  const market = firstNonEmpty([titulo.mercado, activo?.mercado, titulo.mercadoCodigo, activo?.mercadoCodigo]);
+  const plazo = normalizeSellOrderPlazo(firstNonEmpty([titulo.plazo, activo?.plazo]));
+  const key = buildStockOptionKey(symbol, market);
+  return {
+    key,
+    symbol,
+    market,
+    plazo,
+    quantity: Math.max(parseOperationNumber(activo?.cantidad), 0),
+    ppc: parseOperationNumber(activo?.ppc),
+    up: parseOperationNumber(activo?.ultimoPrecio),
+    priceStep: null,
+    priceStepError: market ? '' : 'Sin mercado',
+  };
+}
+
+function normalizePortfolioActionRows(portfolio) {
+  const activos = Array.isArray(portfolio?.activos) ? portfolio.activos : [];
+  return activos
+    .map(normalizePortfolioActionRow)
+    .filter(Boolean)
+    .sort((left, right) => left.symbol.localeCompare(right.symbol));
+}
+
+function getPortfolioControl(item, row) {
+  if (!item.portfolioControls[row.key]) {
+    const defaultPrice = row.up > 0 ? String(row.up) : '';
+    item.portfolioControls[row.key] = {
+      percent: 100,
+      percentText: '100%',
+      priceText: defaultPrice,
+      normalizedPrice: row.up > 0 ? row.up : null,
+      sellError: '',
+      selling: false,
+    };
+  }
+  return item.portfolioControls[row.key];
+}
+
+function calculateSellQuantity(quantity, percent) {
+  const owned = Math.max(Math.round(Number(quantity) || 0), 0);
+  const normalizedPercent = clamp(Number(percent) || 0, 0, 100);
+  if (owned <= 0 || normalizedPercent <= 0) {
+    return 0;
+  }
+  return Math.min(owned, Math.max(1, Math.round((owned * normalizedPercent) / 100)));
+}
+
+function normalizePercentInput(value) {
+  const parsed = parseOperationNumber(value);
+  return clamp(parsed, 0, 100);
+}
+
+function normalizeSliderPercentInput(value) {
+  const parsed = normalizePercentInput(value);
+  return clamp(Math.round(parsed / 5) * 5, 0, 100);
+}
+
+function decimalPlaces(value) {
+  const text = String(value);
+  if (!text.includes('.')) {
+    return 0;
+  }
+  return text.split('.')[1].replace(/0+$/, '').length;
+}
+
+function trimDecimalZeroes(value) {
+  const text = String(value);
+  if (!text.includes('.')) {
+    return text;
+  }
+  return text.replace(/0+$/, '').replace(/\.$/, '');
+}
+
+function formatPriceForInput(value, step = null) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return '';
+  }
+  if (!step || !Number.isFinite(step) || step <= 0) {
+    return String(number);
+  }
+  return trimDecimalZeroes(number.toFixed(Math.min(Math.max(decimalPlaces(step), 0), 6)));
+}
+
+function collectQuotePrices(flags) {
+  const prices = [];
+  const puntas = Array.isArray(flags?.puntas) ? flags.puntas : [];
+  for (const flag of puntas) {
+    for (const key of ['precioCompra', 'precioVenta']) {
+      const price = parseOptionalNumber(flag?.[key]);
+      if (price !== null && price > 0) {
+        prices.push(price);
+      }
+    }
+  }
+  const lastPrice = parseOptionalNumber(flags?.ultimoPrecio);
+  if (lastPrice !== null && lastPrice > 0) {
+    prices.push(lastPrice);
+  }
+  return prices;
+}
+
+function derivePriceStepFromPrices(prices) {
+  const unique = Array.from(new Set(
+    prices
+      .map((price) => Number(price))
+      .filter((price) => Number.isFinite(price) && price > 0)
+      .map((price) => Number(price.toFixed(6)))
+  )).sort((left, right) => left - right);
+
+  let step = null;
+  for (let index = 1; index < unique.length; index += 1) {
+    const diff = Number((unique[index] - unique[index - 1]).toFixed(6));
+    if (diff > 0 && (step === null || diff < step)) {
+      step = diff;
+    }
+  }
+  return step;
+}
+
+function parsePriceNumber(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value;
+  }
+
+  const raw = safeText(value, '');
+  if (!raw) {
+    return 0;
+  }
+
+  const sanitized = raw.replace(/[^0-9,.-]/g, '');
+  if (!sanitized) {
+    return 0;
+  }
+
+  if (sanitized.includes(',')) {
+    return parseOperationNumber(sanitized);
+  }
+
+  if (/^-?\d{1,3}(?:\.\d{3})+$/.test(sanitized)) {
+    const parsedThousands = Number(sanitized.replace(/\./g, ''));
+    return Number.isFinite(parsedThousands) ? parsedThousands : 0;
+  }
+
+  const parsed = Number(sanitized);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function normalizePriceToStep(value, step) {
+  const price = parsePriceNumber(value);
+  if (price <= 0) {
+    return null;
+  }
+  if (!step || !Number.isFinite(step) || step <= 0) {
+    return price;
+  }
+  return Number((Math.round(price / step) * step).toFixed(Math.min(Math.max(decimalPlaces(step), 0), 6)));
+}
+
+function canSubmitSellOrder() {
+  return Boolean(window.apiBroker && typeof window.apiBroker.sellOrder === 'function');
+}
+
+function canCancelOperation() {
+  return Boolean(window.apiBroker && typeof window.apiBroker.cancelOperation === 'function');
 }
 
 function parseOperationNumber(value) {
@@ -550,11 +1070,38 @@ function splitPendingOperation(row) {
   };
 }
 
+function resolveOperationNumber(row) {
+  const value = firstDefined(row, [
+    'numeroOperacion',
+    'numero',
+    'nroOperacion',
+    'idOperacion',
+    'numeroOrden',
+    'nroOrden',
+    'id'
+  ]);
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (typeof value === 'number') {
+    return Number.isInteger(value) && value > 0 ? String(value) : '';
+  }
+  const text = safeText(value, '');
+  if (!/^\d+$/.test(text) || Number(text) <= 0) {
+    return '';
+  }
+  return text;
+}
+
 function buildPendingOperationSummary(row, pendingSplit) {
+  const numeroOperacion = resolveOperationNumber(row);
   return {
+    numeroOperacion,
     fecha: safeText(firstDefined(row, ['fechaOrden', 'fecha', 'fechaOperada'])),
     estado: safeText(row.estado),
     mercado: safeText(row.mercado),
+    simbolo: safeText(row.simbolo, ''),
+    tipo: safeText(row.tipo, ''),
     cantidadPendiente: pendingSplit.remainingQuantity,
     montoPendiente: pendingSplit.remainingAmount,
     precio: pendingSplit.orderPrice,
@@ -714,7 +1261,7 @@ function buildSummaryTable(headers, rows) {
   return table;
 }
 
-function buildPendingOperationsSummary(operations, summary = {}, priceLabel = 'PPC') {
+function buildPendingOperationsSummary(operations, summary = {}, priceLabel = 'PPC', item = null) {
   if (!Array.isArray(operations) || operations.length === 0) {
     const wrapper = document.createElement('div');
     wrapper.className = 'pending-operations-list';
@@ -734,15 +1281,54 @@ function buildPendingOperationsSummary(operations, summary = {}, priceLabel = 'P
   );
   pendingSummaryTable.classList.add('pending-total-table');
 
-  const pendingRows = operations.map((operation, index) => [
-    String(index + 1),
-    formatNumber(operation.cantidadOperada),
-    formatNumber(operation.cantidadPendiente),
-    formatNumber(operation.montoPendiente),
-    formatNumber(operation.precio)
-  ]);
+  const pendingTable = document.createElement('table');
+  pendingTable.className = 'summary-table pending-operations-table';
 
-  const pendingTable = buildSummaryTable(['Op', 'Operadas', 'Cantidad', 'Monto', 'Precio'], pendingRows);
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  for (const title of ['Op', 'Operadas', 'Cantidad', 'Monto', 'Precio', '']) {
+    const th = document.createElement('th');
+    th.textContent = title;
+    headerRow.appendChild(th);
+  }
+  thead.appendChild(headerRow);
+  pendingTable.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  operations.forEach((operation, index) => {
+    const tr = document.createElement('tr');
+    for (const value of [
+      String(index + 1),
+      formatNumber(operation.cantidadOperada),
+      formatNumber(operation.cantidadPendiente),
+      formatNumber(operation.montoPendiente),
+      formatNumber(operation.precio)
+    ]) {
+      const td = document.createElement('td');
+      td.textContent = value;
+      tr.appendChild(td);
+    }
+
+    const cancelCell = document.createElement('td');
+    cancelCell.className = 'pending-operation-cancel-cell';
+    const cancelButton = document.createElement('button');
+    const operationNumber = operation.numeroOperacion;
+    const isCanceling = Boolean(item?.pendingCanceling?.[operationNumber]);
+    cancelButton.type = 'button';
+    cancelButton.className = 'pending-operation-cancel-btn';
+    cancelButton.textContent = isCanceling ? '...' : '×';
+    cancelButton.setAttribute('aria-label', 'Cancelar operación pendiente');
+    cancelButton.title = operationNumber ? 'Cancelar operación' : 'Sin número de operación';
+    cancelButton.disabled = !item || !operationNumber || isCanceling || !canCancelOperation();
+    cancelButton.addEventListener('click', (event) => {
+      event.stopPropagation();
+      handlePendingOperationCancel(item, operation);
+    });
+    cancelCell.appendChild(cancelButton);
+    tr.appendChild(cancelCell);
+    tbody.appendChild(tr);
+  });
+  pendingTable.appendChild(tbody);
   pendingTable.classList.add('pending-operations-table');
 
   wrapper.appendChild(pendingSummaryTable);
@@ -751,10 +1337,84 @@ function buildPendingOperationsSummary(operations, summary = {}, priceLabel = 'P
   return wrapper;
 }
 
+function removeOperationByNumber(operations, operationNumber) {
+  return (operations || []).filter((operation) => resolveOperationNumber(operation) !== operationNumber);
+}
+
+async function handlePendingOperationCancel(item, operation) {
+  if (!item || item.type !== 'summary') {
+    return;
+  }
+  if (!canCancelOperation()) {
+    setStatus('Cancelación no disponible.', 'error');
+    return;
+  }
+
+  const operationNumber = operation?.numeroOperacion || '';
+  if (!operationNumber) {
+    setStatus('La operación no tiene número para cancelar.', 'error');
+    return;
+  }
+
+  const confirmed = await showDashboardConfirmDialog({
+    title: 'Cancelar Orden',
+    message: `Cancelar operación ${operationNumber}?`,
+    details: `${operation.simbolo || item.selectedSymbol} · ${formatNumber(operation.cantidadPendiente)} a ${formatNumber(operation.precio)}`,
+    confirmLabel: 'Confirmar',
+    cancelLabel: 'Cancelar'
+  });
+  if (!confirmed) {
+    return;
+  }
+
+  item.pendingCanceling[operationNumber] = true;
+  renderDashboardItem(item);
+
+  try {
+    const response = await window.apiBroker.cancelOperation({ numeroOperacion: operationNumber });
+    if (!response || response.estado !== 'ok') {
+      throw new Error(response?.mensaje || 'No se pudo cancelar la operación.');
+    }
+
+    invalidateDashboardCache('operations');
+    cancelDashboardRequestsByType('summary');
+    const updatedOperations = removeOperationByNumber(summaryOperations, operationNumber);
+    applySharedOperationsData(updatedOperations, lastOperationsRefreshAt || nowLocal(), {
+      clearErrors: true,
+      renderSummaries: true
+    });
+    item.error = '';
+    renderDashboardItem(item);
+    setStatus(`Operación cancelada: ${operationNumber}.`, 'ok');
+    loadSummaryItem(item.id, { source: 'auto', force: true });
+  } catch (error) {
+    item.error = error.message || 'No se pudo cancelar la operación.';
+  } finally {
+    delete item.pendingCanceling[operationNumber];
+    renderDashboardItem(item);
+  }
+}
+
 function createStateNode(message, tone = 'neutral') {
   const node = document.createElement('p');
   node.className = tone === 'error' ? 'dashboard-state error' : 'dashboard-state';
   node.textContent = message;
+  return node;
+}
+
+function createUpdatingIndicator(message = 'Actualizando') {
+  const node = document.createElement('div');
+  node.className = 'dashboard-updating';
+
+  const spinner = document.createElement('span');
+  spinner.className = 'dashboard-updating-spinner';
+  spinner.setAttribute('aria-hidden', 'true');
+
+  const text = document.createElement('span');
+  text.textContent = message;
+
+  node.appendChild(spinner);
+  node.appendChild(text);
   return node;
 }
 
@@ -787,16 +1447,35 @@ function constrainItemToCanvas(item) {
   item.y = clamp(item.y, 0, Math.max(rect.height - item.height, 0));
 }
 
+function getRenderedItemFrame(item) {
+  const rect = getCanvasRect();
+  const typeConfig = DASHBOARD_OBJECT_TYPES[item.type];
+  const minWidth = typeConfig?.minWidth || 260;
+  const minHeight = typeConfig?.minHeight || 180;
+  const maxWidth = Math.max(rect.width, minWidth);
+  const maxHeight = Math.max(rect.height, minHeight);
+  const width = clamp(item.width, minWidth, maxWidth);
+  const height = clamp(item.height, minHeight, maxHeight);
+
+  return {
+    x: clamp(item.x, 0, Math.max(rect.width - width, 0)),
+    y: clamp(item.y, 0, Math.max(rect.height - height, 0)),
+    width,
+    height,
+  };
+}
+
 function updateItemFrame(item) {
   const element = dashboardCanvas.querySelector(`[data-dashboard-item-id="${item.id}"]`);
   if (!element) {
     return;
   }
 
-  element.style.left = `${item.x}px`;
-  element.style.top = `${item.y}px`;
-  element.style.width = `${item.width}px`;
-  element.style.height = `${item.height}px`;
+  const frame = getRenderedItemFrame(item);
+  element.style.left = `${frame.x}px`;
+  element.style.top = `${frame.y}px`;
+  element.style.width = `${frame.width}px`;
+  element.style.height = `${frame.height}px`;
   element.style.zIndex = String(item.zIndex || 1);
 }
 
@@ -846,7 +1525,7 @@ function ensureDashboardObjectElement(item) {
 }
 
 function isRefreshableItem(item) {
-  return item.type === 'summary' || item.type === 'flags';
+  return item.type === 'summary' || item.type === 'flags' || item.type === 'portfolioActions';
 }
 
 function itemHasRefreshTarget(item) {
@@ -855,6 +1534,9 @@ function itemHasRefreshTarget(item) {
   }
   if (item.type === 'flags') {
     return Boolean(item.selectedStock && item.selectedStock.market);
+  }
+  if (item.type === 'portfolioActions') {
+    return true;
   }
   return false;
 }
@@ -886,12 +1568,7 @@ function createHeaderTitleControl(item, fallbackText) {
     select.setAttribute('aria-label', 'Seleccionar acción');
     select.appendChild(createSelectOption('', item.sourcesLoading ? 'Cargando...' : 'Acción'));
     for (const option of item.stockOptions || []) {
-      const optionLabel = [
-        option.symbol,
-        option.market || 'sin mercado',
-        option.sourceLabels.join(' + ')
-      ].join(' · ');
-      select.appendChild(createSelectOption(option.key, optionLabel));
+      select.appendChild(createSelectOption(option.key, option.symbol));
     }
     select.value = item.selectedStockKey || '';
     select.disabled = !activeUsername || item.sourcesLoading || item.loading || item.stockOptions.length === 0;
@@ -919,13 +1596,16 @@ function handleRefreshToggle(itemId) {
   } else if (item.type === 'summary') {
     configureSummaryTimer(item);
     if (item.selectedSymbol) {
-      loadSummaryItem(item.id, { source: 'manual' });
+      loadSummaryItem(item.id, { source: 'manual', force: true });
     }
-  } else {
+  } else if (item.type === 'flags') {
     configureFlagsTimer(item);
     if (item.selectedStock) {
-      loadFlagsForItem(item.id, { source: 'manual' });
+      loadFlagsForItem(item.id, { source: 'manual', force: true });
     }
+  } else {
+    configurePortfolioActionsTimer(item);
+    loadPortfolioActionsItem(item.id, { source: 'manual', force: true });
   }
 
   renderDashboardItem(item);
@@ -1081,7 +1761,7 @@ function renderOperationSummaryContent(container, item) {
           cantidadTotal: totals.pendientes.cantidad,
           montoTotal: totals.pendientes.monto,
           precioPromedio: pendingPrecioPromedio
-        }, priceLabel),
+        }, priceLabel, item),
         toggleMeta: pendingOperations.length === 1 ? '1 op' : `${pendingOperations.length} ops`,
         onToggle: () => {
           item.pendingExpanded = !item.pendingExpanded;
@@ -1096,7 +1776,7 @@ function renderOperationSummaryContent(container, item) {
 }
 
 function renderSummaryObject(item, root) {
-  root.appendChild(createObjectHeader(item, 'Resumen operaciones', {
+  root.appendChild(createObjectHeader(item, 'Resumen de operaciones', {
     showLastUpdated: true,
     showInterval: true,
     showRefreshControls: true,
@@ -1111,15 +1791,21 @@ function renderSummaryObject(item, root) {
 
   if (!activeUsername) {
     content.appendChild(createStateNode('No hay cuenta activa.', 'error'));
-  } else if (item.loading) {
+  } else if (item.loading && (!item.selectedSymbol || item.operations.length === 0)) {
     content.appendChild(createStateNode('Cargando operaciones...'));
-  } else if (item.error) {
+  } else if (item.error && item.operations.length === 0) {
     content.appendChild(createStateNode(item.error, 'error'));
   } else if (availableOperationSymbols.length === 0 && lastOperationsRefreshAt) {
     content.appendChild(createStateNode('No hay operaciones con símbolo para el rango actual.'));
   } else if (!item.selectedSymbol) {
     content.appendChild(createStateNode('Seleccioná un símbolo de tus operaciones.'));
   } else {
+    if (item.loading) {
+      content.appendChild(createUpdatingIndicator('Actualizando'));
+    }
+    if (item.error) {
+      content.appendChild(createStateNode(item.error, 'error'));
+    }
     content.appendChild(createModeTabs(item));
     renderOperationSummaryContent(content, item);
   }
@@ -1136,7 +1822,7 @@ function renderChartState(frame, message, tone = 'neutral') {
   frame.appendChild(state);
 }
 
-function renderTradingViewWidget(frame) {
+function renderTradingViewWidget(frame, item) {
   clearNode(frame);
 
   const loading = document.createElement('p');
@@ -1153,41 +1839,57 @@ function renderTradingViewWidget(frame) {
   widget.style.height = '100%';
   widget.style.width = '100%';
 
-  const script = document.createElement('script');
-  script.type = 'text/javascript';
-  script.src = TRADINGVIEW_WIDGET_SCRIPT_URL;
-  script.async = true;
-  script.textContent = JSON.stringify({
-    autosize: true,
-    symbol: DEFAULT_TRADINGVIEW_SYMBOL,
-    interval: 'D',
-    timezone: 'exchange',
-    theme: 'light',
-    style: '1',
-    locale: 'es',
-    hide_side_toolbar: false,
-    hide_top_toolbar: false,
-    allow_symbol_change: true,
-    save_image: true,
-    calendar: false,
-    support_host: 'https://www.tradingview.com'
-  });
-  script.addEventListener('load', () => {
-    loading.remove();
-  });
-  script.addEventListener('error', () => {
-    renderChartState(frame, 'No se pudo cargar el gráfico de TradingView.', 'error');
-  });
-
   container.appendChild(widget);
-  container.appendChild(script);
   frame.appendChild(loading);
   frame.appendChild(container);
+
+  const renderToken = (item.tradingViewRenderToken || 0) + 1;
+  item.tradingViewRenderToken = renderToken;
+  const injectWidget = () => {
+    if (!frame.isConnected || item.tradingViewRenderToken !== renderToken) {
+      return;
+    }
+
+    const script = document.createElement('script');
+    script.type = 'text/javascript';
+    script.src = TRADINGVIEW_WIDGET_SCRIPT_URL;
+    script.async = true;
+    script.textContent = JSON.stringify({
+      autosize: true,
+      symbol: DEFAULT_TRADINGVIEW_SYMBOL,
+      interval: 'D',
+      timezone: 'exchange',
+      theme: 'light',
+      style: '1',
+      locale: 'es',
+      hide_side_toolbar: false,
+      hide_top_toolbar: false,
+      allow_symbol_change: true,
+      save_image: true,
+      calendar: false,
+      support_host: 'https://www.tradingview.com'
+    });
+    script.addEventListener('load', () => {
+      loading.remove();
+    });
+    script.addEventListener('error', () => {
+      if (frame.isConnected) {
+        renderChartState(frame, 'No se pudo cargar el gráfico de TradingView.', 'error');
+      }
+    });
+    container.appendChild(script);
+  };
+
+  if (typeof window.requestIdleCallback === 'function') {
+    window.requestIdleCallback(injectWidget, { timeout: 1200 });
+  } else {
+    window.setTimeout(injectWidget, 80);
+  }
 }
 
 function renderTradingViewObject(item, root) {
-  root.appendChild(createObjectHeader(item, 'Panel TradingView', {
-    titleText: 'TradingView'
+  root.appendChild(createObjectHeader(item, 'Panel de TradingView', {
+    titleText: 'Panel de TradingView'
   }));
 
   const body = document.createElement('div');
@@ -1195,7 +1897,7 @@ function renderTradingViewObject(item, root) {
 
   const frame = document.createElement('div');
   frame.className = 'dashboard-chart-frame';
-  renderTradingViewWidget(frame);
+  renderTradingViewWidget(frame, item);
 
   body.appendChild(frame);
   root.appendChild(body);
@@ -1237,13 +1939,18 @@ function buildFlagsDepthLevels(flags, side) {
     .slice(0, FLAGS_DEPTH_LEVEL_LIMIT);
 }
 
-function createFlagsDepthRow(level, maxQuantity, side) {
+function createFlagsDepthRow(item, level, maxQuantity, side) {
   const row = document.createElement('div');
   row.className = `dashboard-flags-depth-row ${side}`;
 
-  const price = document.createElement('span');
+  const price = document.createElement('button');
+  price.type = 'button';
   price.className = 'dashboard-flags-depth-price';
   price.textContent = formatOptionalNumber(level.price);
+  price.title = 'Usar precio en Acciones de portafolio';
+  price.addEventListener('click', () => {
+    handleFlagsPriceClick(item, level.price);
+  });
 
   const barTrack = document.createElement('span');
   barTrack.className = 'dashboard-flags-depth-track';
@@ -1266,7 +1973,7 @@ function createFlagsDepthRow(level, maxQuantity, side) {
   return row;
 }
 
-function createFlagsDepthSide(title, levels, side) {
+function createFlagsDepthSide(item, title, levels, side) {
   const section = document.createElement('section');
   section.className = `dashboard-flags-depth-side ${side}`;
 
@@ -1290,15 +1997,50 @@ function createFlagsDepthSide(title, levels, side) {
   const rows = document.createElement('div');
   rows.className = 'dashboard-flags-depth-rows';
   for (const level of levels) {
-    rows.appendChild(createFlagsDepthRow(level, maxQuantity, side));
+    rows.appendChild(createFlagsDepthRow(item, level, maxQuantity, side));
   }
   section.appendChild(rows);
   return section;
 }
 
+function handleFlagsPriceClick(flagsItem, price) {
+  const numericPrice = parseOptionalNumber(price);
+  const stock = flagsItem?.selectedStock;
+  if (numericPrice === null || !stock) {
+    return;
+  }
+
+  let applied = false;
+  for (const item of dashboardItems) {
+    if (item.type !== 'portfolioActions') {
+      continue;
+    }
+    const row = (item.portfolioRows || []).find((candidate) => {
+      const sameSymbol = candidate.symbol === stock.symbol;
+      const sameMarket = !stock.market || !candidate.market || candidate.market === stock.market;
+      return sameSymbol && sameMarket;
+    });
+    if (!row) {
+      continue;
+    }
+
+    const control = getPortfolioControl(item, row);
+    const normalizedPrice = normalizePriceToStep(numericPrice, row.priceStep);
+    control.normalizedPrice = normalizedPrice;
+    control.priceText = formatPriceForInput(normalizedPrice ?? numericPrice, row.priceStep);
+    control.sellError = '';
+    renderDashboardItem(item);
+    applied = true;
+  }
+
+  if (applied) {
+    setStatus(`Precio aplicado: ${stock.symbol}.`, 'ok');
+  }
+}
+
 function renderFlagsContent(container, item) {
   if (item.sourcesLoading) {
-    container.appendChild(createStateNode('Cargando portfolio y operaciones...'));
+    container.appendChild(createStateNode('Cargando portafolio y operaciones...'));
     return;
   }
   if (item.sourcesError) {
@@ -1306,22 +2048,22 @@ function renderFlagsContent(container, item) {
     return;
   }
   if (!item.stockOptions.length) {
-    container.appendChild(createStateNode('No hay acciones disponibles desde portfolio u operaciones recientes.'));
+    container.appendChild(createStateNode('No hay acciones disponibles desde portafolio u operaciones recientes.'));
     return;
   }
   if (!item.selectedStock) {
-    container.appendChild(createStateNode('Seleccioná una acción del portfolio u operaciones recientes.'));
+    container.appendChild(createStateNode('Seleccioná una acción del portafolio u operaciones recientes.'));
     return;
   }
   if (!item.selectedStock.market) {
     container.appendChild(createStateNode('No hay mercado disponible para consultar puntas de esta acción.', 'error'));
     return;
   }
-  if (item.loading) {
+  if (item.loading && !item.flags) {
     container.appendChild(createStateNode('Cargando puntas...'));
     return;
   }
-  if (item.error) {
+  if (item.error && !item.flags) {
     container.appendChild(createStateNode(item.error, 'error'));
     return;
   }
@@ -1341,9 +2083,16 @@ function renderFlagsContent(container, item) {
 
   const chart = document.createElement('div');
   chart.className = 'dashboard-flags-depth-chart';
-  chart.appendChild(createFlagsDepthSide('Compra', buyLevels, 'buy'));
-  chart.appendChild(createFlagsDepthSide('Venta', sellLevels, 'sell'));
+  chart.appendChild(createFlagsDepthSide(item, 'Compra', buyLevels, 'buy'));
+  chart.appendChild(createFlagsDepthSide(item, 'Venta', sellLevels, 'sell'));
   container.appendChild(chart);
+
+  if (item.error) {
+    container.appendChild(createStateNode(item.error, 'error'));
+  }
+  if (item.loading) {
+    container.appendChild(createUpdatingIndicator('Actualizando puntas'));
+  }
 }
 
 function renderFlagsObject(item, root) {
@@ -1365,9 +2114,287 @@ function renderFlagsObject(item, root) {
   root.appendChild(body);
 }
 
+function createPortfolioPercentControl(item, row, control) {
+  const wrapper = document.createElement('div');
+  wrapper.className = 'portfolio-actions-percent';
+
+  const slider = document.createElement('input');
+  slider.type = 'range';
+  slider.min = '0';
+  slider.max = '100';
+  slider.step = '5';
+  slider.value = String(control.percent);
+  slider.setAttribute('aria-label', `Porcentaje a vender de ${row.symbol}`);
+  slider.addEventListener('input', () => {
+    control.percent = normalizeSliderPercentInput(slider.value);
+    control.percentText = `${control.percent}%`;
+    percentInput.value = control.percentText;
+  });
+  slider.addEventListener('change', () => {
+    renderDashboardItem(item);
+  });
+
+  const percentInput = document.createElement('input');
+  percentInput.type = 'text';
+  percentInput.className = 'portfolio-actions-percent-input';
+  percentInput.value = control.percentText || `${control.percent}%`;
+  percentInput.setAttribute('aria-label', `Editar porcentaje de ${row.symbol}`);
+  const commitPercent = () => {
+    control.percent = normalizePercentInput(percentInput.value);
+    control.percentText = `${control.percent}%`;
+    renderDashboardItem(item);
+  };
+  percentInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      percentInput.blur();
+    }
+  });
+  percentInput.addEventListener('blur', commitPercent);
+
+  wrapper.appendChild(slider);
+  wrapper.appendChild(percentInput);
+  return wrapper;
+}
+
+function createPortfolioPriceInput(item, row, control) {
+  const input = document.createElement('input');
+  input.type = 'text';
+  input.className = 'portfolio-actions-price-input';
+  input.value = control.priceText || '';
+  input.placeholder = row.priceStep ? `Inc. ${formatPriceForInput(row.priceStep, row.priceStep)}` : 'Precio';
+  input.setAttribute('aria-label', `Precio de venta para ${row.symbol}`);
+
+  const commitPrice = () => {
+    const normalized = normalizePriceToStep(input.value, row.priceStep);
+    control.normalizedPrice = normalized;
+    control.priceText = normalized === null ? '' : formatPriceForInput(normalized, row.priceStep);
+    control.sellError = row.priceStep ? '' : 'Incremento no disponible; precio sin normalizar.';
+    renderDashboardItem(item);
+  };
+
+  input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      input.blur();
+    }
+  });
+  input.addEventListener('blur', commitPrice);
+  return input;
+}
+
+async function handlePortfolioSellClick(item, row) {
+  if (!canSubmitSellOrder()) {
+    setStatus('Venta no disponible: todavía no hay flujo de órdenes configurado.', 'error');
+    return;
+  }
+
+  const control = getPortfolioControl(item, row);
+  if (control.selling) {
+    return;
+  }
+
+  const quantity = calculateSellQuantity(row.quantity, control.percent);
+  const price = normalizePriceToStep(control.priceText, row.priceStep);
+
+  if (quantity <= 0) {
+    control.sellError = 'Cantidad inválida.';
+  } else if (!price || price <= 0) {
+    control.sellError = 'Indicá un precio válido.';
+  } else if (!row.market) {
+    control.sellError = 'Sin mercado para operar.';
+  } else {
+    control.sellError = '';
+  }
+
+  if (control.sellError) {
+    renderDashboardItem(item);
+    return;
+  }
+
+  const normalizedPrice = row.priceStep ? normalizePriceToStep(price, row.priceStep) : price;
+  const formattedPrice = formatPriceForInput(normalizedPrice, row.priceStep);
+  const plazo = row.plazo || 't2';
+  const confirmed = await showDashboardConfirmDialog({
+    title: 'Confirmar Venta',
+    message: `Vender ${row.symbol} x${quantity} a ${formattedPrice}`,
+    details: `${row.market} · ${plazo}`,
+    confirmLabel: 'Confirmar',
+    cancelLabel: 'Cancelar'
+  });
+
+  if (!confirmed) {
+    return;
+  }
+
+  control.selling = true;
+  control.sellError = '';
+  renderDashboardItem(item);
+
+  try {
+    const response = await window.apiBroker.sellOrder({
+      mercado: row.market,
+      simbolo: row.symbol,
+      tipoOrden: 'precioLimite',
+      cantidad: quantity,
+      precio: normalizedPrice,
+      plazo,
+    });
+
+    if (!response || response.estado !== 'ok') {
+      throw new Error(response?.mensaje || 'No se pudo enviar la orden.');
+    }
+
+    control.sellError = '';
+    setStatus(`Orden de venta enviada: ${row.symbol} x${quantity}.`, 'ok');
+    invalidateDashboardCache('portfolio');
+    invalidateDashboardCache('operations');
+    cancelDashboardRequestsByType('portfolioActions');
+    cancelDashboardRequestsByType('summary');
+    loadPortfolioActionsItem(item.id, { source: 'manual', force: true });
+  } catch (error) {
+    control.sellError = error.message || 'No se pudo enviar la orden.';
+  } finally {
+    control.selling = false;
+    renderDashboardItem(item);
+  }
+}
+
+function createPortfolioActionsRow(item, row) {
+  const control = getPortfolioControl(item, row);
+  const quantityToSell = calculateSellQuantity(row.quantity, control.percent);
+
+  const tr = document.createElement('tr');
+
+  const symbolCell = document.createElement('td');
+  const symbolWrap = document.createElement('div');
+  symbolWrap.className = 'portfolio-actions-symbol';
+
+  const symbol = document.createElement('strong');
+  symbol.textContent = row.symbol;
+  symbolWrap.appendChild(symbol);
+  symbolWrap.appendChild(createPortfolioPercentControl(item, row, control));
+  if (control.sellError || row.priceStepError) {
+    const error = document.createElement('span');
+    error.className = control.sellError ? 'portfolio-actions-row-error' : 'portfolio-actions-row-note';
+    error.textContent = control.sellError || row.priceStepError;
+    symbolWrap.appendChild(error);
+  }
+  symbolCell.appendChild(symbolWrap);
+
+  const quantityCell = document.createElement('td');
+  quantityCell.textContent = formatOptionalNumber(row.quantity);
+
+  const ppcCell = document.createElement('td');
+  ppcCell.textContent = formatOptionalNumber(row.ppc);
+
+  const upCell = document.createElement('td');
+  upCell.textContent = formatOptionalNumber(row.up);
+
+  const sellCell = document.createElement('td');
+  const sellControls = document.createElement('div');
+  sellControls.className = 'portfolio-actions-sell-controls';
+  sellControls.appendChild(createPortfolioPriceInput(item, row, control));
+
+  const quantityPreview = document.createElement('span');
+  quantityPreview.className = 'portfolio-actions-quantity';
+  quantityPreview.textContent = `x${quantityToSell}`;
+  sellControls.appendChild(quantityPreview);
+
+  const sellButton = document.createElement('button');
+  sellButton.className = 'portfolio-actions-sell-btn';
+  sellButton.type = 'button';
+  sellButton.textContent = control.selling ? 'Enviando' : 'Vender';
+  sellButton.disabled = !canSubmitSellOrder() || control.selling || !row.market || quantityToSell <= 0 || !control.priceText;
+  if (!canSubmitSellOrder()) {
+    sellButton.title = 'Venta no disponible: falta configurar el flujo de órdenes.';
+  } else if (!row.market) {
+    sellButton.title = 'Sin mercado para operar.';
+  } else if (quantityToSell <= 0) {
+    sellButton.title = 'Cantidad inválida.';
+  } else if (!control.priceText) {
+    sellButton.title = 'Indicá un precio.';
+  } else {
+    sellButton.title = 'Enviar orden de venta';
+  }
+  if (!sellButton.disabled) {
+    sellButton.addEventListener('click', () => {
+      handlePortfolioSellClick(item, row);
+    });
+  }
+  sellControls.appendChild(sellButton);
+  sellCell.appendChild(sellControls);
+
+  tr.appendChild(symbolCell);
+  tr.appendChild(quantityCell);
+  tr.appendChild(ppcCell);
+  tr.appendChild(upCell);
+  tr.appendChild(sellCell);
+  return tr;
+}
+
+function renderPortfolioActionsContent(container, item) {
+  if (item.loading && item.portfolioRows.length === 0) {
+    container.appendChild(createStateNode('Cargando portafolio...'));
+    return;
+  }
+  if (item.error && item.portfolioRows.length === 0) {
+    container.appendChild(createStateNode(item.error, 'error'));
+    return;
+  }
+  if (item.portfolioRows.length === 0) {
+    container.appendChild(createStateNode('No hay activos en el portafolio.'));
+    return;
+  }
+
+  if (item.loading || item.stepsLoading) {
+    container.appendChild(createUpdatingIndicator(item.loading ? 'Actualizando portafolio' : 'Detectando incrementos'));
+  }
+  if (item.error) {
+    container.appendChild(createStateNode(item.error, 'error'));
+  }
+
+  const table = document.createElement('table');
+  table.className = 'portfolio-actions-table';
+  const thead = document.createElement('thead');
+  const headerRow = document.createElement('tr');
+  for (const title of ['Símbolo', 'Cantidad', 'PPC', 'UP', '']) {
+    const th = document.createElement('th');
+    th.textContent = title;
+    headerRow.appendChild(th);
+  }
+  thead.appendChild(headerRow);
+  table.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  for (const row of item.portfolioRows) {
+    tbody.appendChild(createPortfolioActionsRow(item, row));
+  }
+  table.appendChild(tbody);
+  container.appendChild(table);
+}
+
+function renderPortfolioActionsObject(item, root) {
+  root.appendChild(createObjectHeader(item, 'Acciones de portafolio', {
+    showLastUpdated: true,
+    showInterval: true,
+    showRefreshControls: true,
+    titleText: 'Acciones de portafolio'
+  }));
+
+  const body = document.createElement('div');
+  body.className = 'dashboard-object-body portfolio-actions-body';
+
+  const content = document.createElement('div');
+  content.className = 'portfolio-actions-content';
+  renderPortfolioActionsContent(content, item);
+
+  body.appendChild(content);
+  root.appendChild(body);
+}
+
 function renderDashboardItem(item) {
   const element = ensureDashboardObjectElement(item);
-  constrainItemToCanvas(item);
   updateItemFrame(item);
 
   const inner = element.querySelector('[data-dashboard-object-inner]');
@@ -1379,6 +2406,8 @@ function renderDashboardItem(item) {
     renderTradingViewObject(item, inner);
   } else if (item.type === 'flags') {
     renderFlagsObject(item, inner);
+  } else if (item.type === 'portfolioActions') {
+    renderPortfolioActionsObject(item, inner);
   }
 }
 
@@ -1425,8 +2454,12 @@ function buildDashboardItem(type, position = null) {
     sourcesLoading: false,
     sourcesError: '',
     flags: null,
+    portfolioRows: [],
+    portfolioControls: {},
+    stepsLoading: false,
     mode: 'compra',
     pendingExpanded: false,
+    pendingCanceling: {},
     loading: false,
     error: '',
     operations: [],
@@ -1442,6 +2475,43 @@ function buildDashboardItem(type, position = null) {
   return item;
 }
 
+function startDashboardItemDataLoad(item, options = {}) {
+  if (!item || !activeUsername) {
+    return;
+  }
+
+  if (item.type === 'summary') {
+    loadSummaryItem(item.id, options);
+    return;
+  }
+  if (item.type === 'flags') {
+    loadFlagsStockOptions(item.id, options);
+    return;
+  }
+  if (item.type === 'portfolioActions') {
+    configurePortfolioActionsTimer(item);
+    loadPortfolioActionsItem(item.id, options);
+  }
+}
+
+function scheduleDashboardItemsDataLoad(items, options = {}) {
+  const itemIds = items.map((item) => item.id);
+  const loadItems = () => {
+    for (const itemId of itemIds) {
+      const item = getItemById(itemId);
+      if (item) {
+        startDashboardItemDataLoad(item, options);
+      }
+    }
+  };
+
+  if (typeof window.requestAnimationFrame === 'function') {
+    window.requestAnimationFrame(loadItems);
+  } else {
+    window.setTimeout(loadItems, 0);
+  }
+}
+
 function addDashboardItem(type, position = null) {
   const item = buildDashboardItem(type, position);
   if (!item) {
@@ -1452,11 +2522,7 @@ function addDashboardItem(type, position = null) {
   renderDashboardItem(item);
   syncEmptyState();
 
-  if (item.type === 'summary' && activeUsername) {
-    loadSummaryItem(item.id, { source: 'manual' });
-  } else if (item.type === 'flags' && activeUsername) {
-    loadFlagsStockOptions(item.id);
-  }
+  scheduleDashboardItemsDataLoad([item], { source: 'manual' });
 }
 
 function clearSummaryTimer(item) {
@@ -1488,10 +2554,42 @@ function configureFlagsTimer(item) {
   }, item.refreshIntervalSec * 1000);
 }
 
+function configurePortfolioActionsTimer(item) {
+  clearSummaryTimer(item);
+  if (item.type !== 'portfolioActions' || !activeUsername || item.refreshPaused) {
+    return;
+  }
+
+  item.timerId = setInterval(() => {
+    loadPortfolioActionsItem(item.id, { source: 'auto' });
+  }, item.refreshIntervalSec * 1000);
+}
+
+function cancelDashboardItemRequests(item) {
+  if (!item) {
+    return;
+  }
+  item.requestId += 1;
+  item.sourcesRequestId += 1;
+  item.loading = false;
+  item.sourcesLoading = false;
+  item.stepsLoading = false;
+  item.tradingViewRenderToken = (item.tradingViewRenderToken || 0) + 1;
+}
+
+function cancelDashboardRequestsByType(type) {
+  for (const item of dashboardItems) {
+    if (item.type === type) {
+      cancelDashboardItemRequests(item);
+    }
+  }
+}
+
 function removeDashboardItem(itemId) {
   const item = getItemById(itemId);
   if (item) {
     clearSummaryTimer(item);
+    cancelDashboardItemRequests(item);
   }
 
   dashboardItems = dashboardItems.filter((candidate) => candidate.id !== itemId);
@@ -1527,6 +2625,7 @@ function readLayoutNumber(value, fallback) {
 function clearDashboardLayout() {
   for (const item of dashboardItems) {
     clearSummaryTimer(item);
+    cancelDashboardItemRequests(item);
   }
   pointerAction = null;
   dashboardItems = [];
@@ -1553,7 +2652,6 @@ function applyDashboardLayout(layout) {
     item.height = readLayoutNumber(rawItem.height, item.height);
     item.zIndex = Math.max(1, readLayoutNumber(rawItem.zIndex, item.zIndex));
     maxLayer = Math.max(maxLayer, item.zIndex);
-    constrainItemToCanvas(item);
     dashboardItems.push(item);
     renderDashboardItem(item);
   }
@@ -1565,13 +2663,7 @@ function applyDashboardLayout(layout) {
     return;
   }
 
-  for (const item of dashboardItems) {
-    if (item.type === 'summary') {
-      loadSummaryItem(item.id, { source: 'manual' });
-    } else if (item.type === 'flags') {
-      loadFlagsStockOptions(item.id);
-    }
-  }
+  scheduleDashboardItemsDataLoad(dashboardItems, { source: 'startup' });
 }
 
 async function saveDashboardLayout() {
@@ -1591,6 +2683,9 @@ async function saveDashboardLayout() {
     if (response.estado !== 'ok') {
       throw new Error(response.mensaje || 'No se pudo guardar el diseño.');
     }
+    lastDashboardLayoutName = name;
+    layoutNameInput.value = '';
+    await refreshDashboardLayoutList(name);
     setStatus(`Diseño guardado: ${name}.`, 'ok');
   } catch (error) {
     setStatus(error.message || 'No se pudo guardar el diseño.', 'error');
@@ -1599,26 +2694,127 @@ async function saveDashboardLayout() {
   }
 }
 
-async function loadDashboardLayout() {
-  const name = getLayoutName();
+function renderDashboardLayoutOptions(layouts, selectedName = '') {
+  clearNode(layoutSelect);
+  layoutSelect.appendChild(createSelectOption('', layouts.length ? 'Diseños guardados' : 'Sin diseños'));
+  for (const layout of layouts) {
+    const option = createSelectOption(layout.name, layout.name);
+    layoutSelect.appendChild(option);
+  }
+  layoutSelect.value = selectedName || '';
+  layoutSelect.disabled = layouts.length === 0;
+  if (deleteLayoutButton) {
+    deleteLayoutButton.disabled = layouts.length === 0;
+  }
+}
+
+async function refreshDashboardLayoutList(selectedName = '', options = {}) {
+  try {
+    const response = await window.apiBroker.listDashboardLayouts({
+      includeLastLayout: Boolean(options.includeLastLayout)
+    });
+    if (response.estado !== 'ok') {
+      throw new Error(response.mensaje || 'No se pudieron cargar diseños.');
+    }
+    lastDashboardLayoutName = safeText(response.lastLayoutName, '').trim();
+    renderDashboardLayoutOptions(
+      Array.isArray(response.layouts) ? response.layouts : [],
+      selectedName || lastDashboardLayoutName
+    );
+    return response;
+  } catch (error) {
+    renderDashboardLayoutOptions([]);
+    setStatus(error.message || 'No se pudieron cargar diseños.', 'error');
+    return null;
+  }
+}
+
+async function loadDashboardLayoutByName(name, options = {}) {
   if (!name) {
-    setStatus('Indicá el nombre del diseño a cargar.', 'error');
-    layoutNameInput?.focus();
     return;
   }
 
-  loadLayoutButton.disabled = true;
+  if (!options.silent) {
+    loadLayoutButton.disabled = true;
+  }
   try {
     const response = await window.apiBroker.loadDashboardLayout({ name });
     if (response.estado !== 'ok') {
       throw new Error(response.mensaje || 'No se pudo cargar el diseño.');
     }
     applyDashboardLayout(response.layout);
-    setStatus(`Diseño cargado: ${name}.`, 'ok');
+    lastDashboardLayoutName = name;
+    if (layoutSelect) {
+      layoutSelect.value = name;
+    }
+    if (!options.silent) {
+      setStatus(`Diseño cargado: ${name}.`, 'ok');
+    }
   } catch (error) {
-    setStatus(error.message || 'No se pudo cargar el diseño.', 'error');
+    if (!options.silent) {
+      setStatus(error.message || 'No se pudo cargar el diseño.', 'error');
+    }
   } finally {
-    loadLayoutButton.disabled = false;
+    if (!options.silent) {
+      loadLayoutButton.disabled = false;
+    }
+  }
+}
+
+async function loadDashboardLayout() {
+  if (!layoutSelect.value) {
+    await refreshDashboardLayoutList();
+  }
+  const name = safeText(layoutSelect.value, '').trim();
+  if (!name) {
+    setStatus(layoutSelect.disabled ? 'No hay diseños guardados.' : 'Elegí un diseño guardado.', 'error');
+    layoutSelect?.focus();
+    return;
+  }
+
+  await loadDashboardLayoutByName(name);
+}
+
+async function deleteDashboardLayout() {
+  if (!layoutSelect.value) {
+    await refreshDashboardLayoutList();
+  }
+
+  const name = safeText(layoutSelect.value, '').trim();
+  if (!name) {
+    setStatus(layoutSelect.disabled ? 'No hay diseños guardados.' : 'Elegí un diseño guardado.', 'error');
+    layoutSelect?.focus();
+    return;
+  }
+
+  const confirmed = await showDashboardConfirmDialog({
+    title: 'Borrar Diseño',
+    message: `Borrar ${name}?`,
+    confirmLabel: 'Confirmar',
+    cancelLabel: 'Cancelar'
+  });
+  if (!confirmed) {
+    return;
+  }
+
+  deleteLayoutButton.disabled = true;
+  try {
+    const response = await window.apiBroker.deleteDashboardLayout({ name });
+    if (response.estado !== 'ok') {
+      throw new Error(response.mensaje || 'No se pudo borrar el diseño.');
+    }
+    if (lastDashboardLayoutName === name) {
+      lastDashboardLayoutName = safeText(response.lastLayoutName, '').trim();
+    }
+    if (layoutNameInput && layoutNameInput.value.trim() === name) {
+      layoutNameInput.value = '';
+    }
+    await refreshDashboardLayoutList(lastDashboardLayoutName);
+    setStatus(`Diseño borrado: ${name}.`, 'ok');
+  } catch (error) {
+    setStatus(error.message || 'No se pudo borrar el diseño.', 'error');
+  } finally {
+    deleteLayoutButton.disabled = layoutSelect.disabled;
   }
 }
 
@@ -1628,6 +2824,7 @@ function resetSummaryItemData(item) {
   item.lastUpdatedAt = null;
   item.loading = false;
   item.pendingExpanded = false;
+  item.pendingCanceling = {};
   item.requestId += 1;
 }
 
@@ -1652,7 +2849,7 @@ function handleSummarySymbolChange(itemId, symbol) {
 
 function handleRefreshIntervalChange(itemId, intervalSeconds) {
   const item = getItemById(itemId);
-  if (!item || (item.type !== 'summary' && item.type !== 'flags')) {
+  if (!item || !isRefreshableItem(item)) {
     return;
   }
 
@@ -1665,9 +2862,12 @@ function handleRefreshIntervalChange(itemId, intervalSeconds) {
   if (item.type === 'summary') {
     lastSummaryRefreshInterval = intervalSeconds;
     configureSummaryTimer(item);
-  } else {
+  } else if (item.type === 'flags') {
     lastFlagsRefreshInterval = intervalSeconds;
     configureFlagsTimer(item);
+  } else {
+    lastPortfolioRefreshInterval = intervalSeconds;
+    configurePortfolioActionsTimer(item);
   }
   renderDashboardItem(item);
 
@@ -1676,13 +2876,35 @@ function handleRefreshIntervalChange(itemId, intervalSeconds) {
   }
 
   if (item.type === 'summary' && item.selectedSymbol) {
-    loadSummaryItem(item.id, { source: 'manual' });
+    loadSummaryItem(item.id, { source: 'manual', force: true });
   } else if (item.type === 'flags' && item.selectedStock) {
-    loadFlagsForItem(item.id, { source: 'manual' });
+    loadFlagsForItem(item.id, { source: 'manual', force: true });
+  } else if (item.type === 'portfolioActions') {
+    loadPortfolioActionsItem(item.id, { source: 'manual', force: true });
   }
 }
 
-async function loadFlagsStockOptions(itemId) {
+function applySharedOperationsData(operations, refreshedAt, options = {}) {
+  syncSummaryOperationsData(operations, refreshedAt);
+  for (const summaryItem of dashboardItems) {
+    if (summaryItem.type !== 'summary') {
+      continue;
+    }
+    summaryItem.operations = summaryItem.selectedSymbol
+      ? (operationsBySymbol.get(summaryItem.selectedSymbol) || [])
+      : [];
+    summaryItem.lastUpdatedAt = summaryItem.selectedSymbol ? refreshedAt : null;
+    if (options.clearErrors) {
+      summaryItem.error = '';
+    }
+  }
+
+  if (options.renderSummaries) {
+    renderSummaryDashboardItems();
+  }
+}
+
+async function loadFlagsStockOptions(itemId, options = {}) {
   const item = getItemById(itemId);
   if (!item || item.type !== 'flags' || !activeUsername || item.sourcesLoading) {
     return;
@@ -1695,9 +2917,9 @@ async function loadFlagsStockOptions(itemId) {
   renderDashboardItem(item);
 
   try {
-    const [portfolioResponse, operationsResponse] = await Promise.all([
-      window.apiBroker.getPortfolio(),
-      window.apiBroker.getOperations(buildDefaultRequestFilters()),
+    const [portfolioData, operationsData] = await Promise.all([
+      getDashboardPortfolio({ force: Boolean(options.force) }),
+      getDashboardOperations({ force: Boolean(options.force) }),
     ]);
 
     const latestItem = getItemById(itemId);
@@ -1705,12 +2927,15 @@ async function loadFlagsStockOptions(itemId) {
       return;
     }
 
+    const portfolioResponse = portfolioData.response;
+    const operationsResponse = operationsData.response;
     if (!Array.isArray(portfolioResponse.activos)) {
-      throw new Error(portfolioResponse.mensaje || 'No se pudo cargar el portfolio.');
+      throw new Error(portfolioResponse.mensaje || 'No se pudo cargar el portafolio.');
     }
     if (!Array.isArray(operationsResponse.operaciones)) {
       throw new Error(operationsResponse.mensaje || 'No se pudieron cargar operaciones recientes.');
     }
+    applySharedOperationsData(operationsResponse.operaciones, operationsData.refreshedAt, { clearErrors: false });
 
     const stockOptions = mergeStockOptions([
       buildPortfolioStockOptions(portfolioResponse),
@@ -1778,24 +3003,29 @@ async function loadFlagsForItem(itemId, options = {}) {
   item.requestId = requestId;
   item.loading = true;
   item.error = '';
-  renderDashboardItem(item);
+  if (options.source !== 'auto' || !item.flags) {
+    renderDashboardItem(item);
+  }
 
   try {
-    const response = await window.apiBroker.getQuoteFlags({
+    const quoteData = await getDashboardQuoteFlags({
       mercado: item.selectedStock.market,
       simbolo: item.selectedStock.symbol,
+    }, {
+      force: Boolean(options.force)
     });
     const latestItem = getItemById(itemId);
     if (!latestItem || latestItem.requestId !== requestId) {
       return;
     }
 
+    const response = quoteData.response;
     if (response.estado !== 'ok' || !response.cotizacion) {
       throw new Error(response.mensaje || 'No se pudieron consultar puntas.');
     }
 
     latestItem.flags = response.cotizacion;
-    latestItem.lastUpdatedAt = nowLocal();
+    latestItem.lastUpdatedAt = quoteData.refreshedAt;
     latestItem.error = '';
     latestItem.loading = false;
     renderDashboardItem(latestItem);
@@ -1814,6 +3044,141 @@ async function loadFlagsForItem(itemId, options = {}) {
   }
 }
 
+async function loadPortfolioPriceSteps(itemId, requestId) {
+  const item = getItemById(itemId);
+  if (!item || item.type !== 'portfolioActions' || item.requestId !== requestId) {
+    return;
+  }
+
+  let cachedStepApplied = false;
+  const rowsNeedingStep = item.portfolioRows.filter((row) => {
+    if (!row.market) {
+      return false;
+    }
+    if (applyCachedPriceStepToRow(row)) {
+      cachedStepApplied = true;
+      return false;
+    }
+    return true;
+  });
+  if (rowsNeedingStep.length === 0) {
+    if (cachedStepApplied) {
+      renderDashboardItem(item);
+    }
+    return;
+  }
+
+  item.stepsLoading = true;
+  renderDashboardItem(item);
+
+  await runWithConcurrency(rowsNeedingStep, DASHBOARD_PRICE_STEP_CONCURRENCY, async (row) => {
+    try {
+      const quoteData = await getDashboardQuoteFlags({
+        mercado: row.market,
+        simbolo: row.symbol,
+      });
+      const latestItem = getItemById(itemId);
+      if (!latestItem || latestItem.requestId !== requestId) {
+        return;
+      }
+      const latestRow = latestItem.portfolioRows.find((candidate) => candidate.key === row.key);
+      if (!latestRow) {
+        return;
+      }
+      const response = quoteData.response;
+      if (response.estado !== 'ok' || !response.cotizacion) {
+        throw new Error(response.mensaje || 'No se pudo detectar incremento.');
+      }
+      const step = derivePriceStepFromPrices(collectQuotePrices(response.cotizacion));
+      latestRow.priceStep = step;
+      latestRow.priceStepError = step ? '' : 'Incremento no disponible';
+      writePortfolioPriceStepCache(latestRow.market, latestRow.symbol, step, latestRow.priceStepError);
+      const control = getPortfolioControl(latestItem, latestRow);
+      if (control.priceText) {
+        const normalized = normalizePriceToStep(control.priceText, step);
+        control.normalizedPrice = normalized;
+        control.priceText = normalized === null ? '' : formatPriceForInput(normalized, step);
+      }
+    } catch (error) {
+      const latestItem = getItemById(itemId);
+      if (!latestItem || latestItem.requestId !== requestId) {
+        return;
+      }
+      const latestRow = latestItem.portfolioRows.find((candidate) => candidate.key === row.key);
+      if (latestRow) {
+        latestRow.priceStep = null;
+        latestRow.priceStepError = error.message || 'Incremento no disponible';
+        writePortfolioPriceStepCache(latestRow.market, latestRow.symbol, null, latestRow.priceStepError);
+      }
+    }
+  });
+
+  const latestItem = getItemById(itemId);
+  if (!latestItem || latestItem.requestId !== requestId) {
+    return;
+  }
+  latestItem.stepsLoading = false;
+  renderDashboardItem(latestItem);
+}
+
+async function loadPortfolioActionsItem(itemId, options = {}) {
+  const item = getItemById(itemId);
+  if (!item || item.type !== 'portfolioActions' || !activeUsername || item.loading) {
+    return;
+  }
+
+  const requestId = item.requestId + 1;
+  item.requestId = requestId;
+  item.loading = true;
+  item.error = '';
+  if (options.source !== 'auto' || item.portfolioRows.length === 0) {
+    renderDashboardItem(item);
+  }
+
+  try {
+    const portfolioData = await getDashboardPortfolio({ force: Boolean(options.force) });
+    const latestItem = getItemById(itemId);
+    if (!latestItem || latestItem.requestId !== requestId) {
+      return;
+    }
+
+    const response = portfolioData.response;
+    if (!Array.isArray(response.activos)) {
+      throw new Error(response.mensaje || 'No se pudo cargar el portafolio.');
+    }
+
+    const previousControls = latestItem.portfolioControls || {};
+    const rows = normalizePortfolioActionRows(response);
+    for (const row of rows) {
+      applyCachedPriceStepToRow(row);
+    }
+    latestItem.portfolioRows = rows;
+    latestItem.portfolioControls = {};
+    for (const row of rows) {
+      latestItem.portfolioControls[row.key] = previousControls[row.key] || undefined;
+      getPortfolioControl(latestItem, row);
+    }
+    latestItem.lastUpdatedAt = portfolioData.refreshedAt;
+    latestItem.error = '';
+    latestItem.loading = false;
+    renderDashboardItem(latestItem);
+    loadPortfolioPriceSteps(itemId, requestId);
+
+    if (options.source !== 'auto') {
+      setStatus('Acciones de portafolio actualizadas.', 'ok');
+    }
+  } catch (error) {
+    const latestItem = getItemById(itemId);
+    if (!latestItem || latestItem.requestId !== requestId) {
+      return;
+    }
+    latestItem.error = error.message || 'No se pudo cargar el portafolio.';
+    latestItem.loading = false;
+    latestItem.stepsLoading = false;
+    renderDashboardItem(latestItem);
+  }
+}
+
 async function loadSummaryItem(itemId, options = {}) {
   const item = getItemById(itemId);
   if (!item || item.type !== 'summary' || !activeUsername || item.loading) {
@@ -1824,21 +3189,24 @@ async function loadSummaryItem(itemId, options = {}) {
   item.requestId = requestId;
   item.loading = true;
   item.error = '';
-  renderDashboardItem(item);
+  if (options.source !== 'auto' || item.operations.length === 0) {
+    renderDashboardItem(item);
+  }
 
   try {
-    const response = await window.apiBroker.getOperations(buildDefaultRequestFilters());
+    const operationsData = await getDashboardOperations({ force: Boolean(options.force) });
     const latestItem = getItemById(itemId);
     if (!latestItem || latestItem.requestId !== requestId) {
       return;
     }
 
+    const response = operationsData.response;
     if (!Array.isArray(response.operaciones)) {
       throw new Error(response.mensaje || 'Error al consultar operaciones.');
     }
 
-    const refreshedAt = nowLocal();
-    syncSummaryOperationsData(response.operaciones, refreshedAt);
+    const refreshedAt = operationsData.refreshedAt;
+    applySharedOperationsData(response.operaciones, refreshedAt, { clearErrors: false });
     latestItem.operations = latestItem.selectedSymbol ? (operationsBySymbol.get(latestItem.selectedSymbol) || []) : [];
     latestItem.lastUpdatedAt = latestItem.selectedSymbol ? refreshedAt : null;
     latestItem.error = '';
@@ -2094,17 +3462,25 @@ function toggleDashboardPanel() {
   dashboardShell.classList.toggle('dashboard-panel-collapsed', collapsed);
   dashboardPanel.hidden = collapsed;
   panelToggleButton.setAttribute('aria-expanded', String(!collapsed));
-  requestAnimationFrame(() => {
-    for (const item of dashboardItems) {
-      constrainItemToCanvas(item);
-      updateItemFrame(item);
-    }
-  });
 }
 
-async function refreshActiveAccount() {
+function renderAccountDependentItems() {
+  for (const item of dashboardItems) {
+    if (item.type !== 'tradingview') {
+      renderDashboardItem(item);
+    }
+  }
+  syncEmptyState();
+}
+
+async function refreshActiveAccount(options = {}) {
+  const refreshRequestId = activeAccountRefreshRequestId + 1;
+  activeAccountRefreshRequestId = refreshRequestId;
   try {
     const response = await window.apiBroker.listAccounts();
+    if (refreshRequestId !== activeAccountRefreshRequestId) {
+      return;
+    }
     if (response.estado !== 'ok') {
       throw new Error(response.mensaje || 'No se pudo cargar la cuenta activa.');
     }
@@ -2115,24 +3491,33 @@ async function refreshActiveAccount() {
     setPaletteEnabled(Boolean(activeUsername));
 
     if (!activeUsername) {
+      invalidateDashboardCache('operations');
+      invalidateDashboardCache('portfolio');
+      invalidateDashboardCache('quoteFlags');
+      portfolioPriceStepCache.clear();
       for (const item of dashboardItems) {
-        if (item.type === 'summary' || item.type === 'flags') {
+        if (isRefreshableItem(item)) {
           clearSummaryTimer(item);
         }
+        cancelDashboardItemRequests(item);
       }
-      renderAllDashboardItems();
+      renderAccountDependentItems();
       setStatus('No hay cuenta activa.', 'error');
       return;
     }
 
     if (changed) {
+      invalidateDashboardCache('operations');
+      invalidateDashboardCache('portfolio');
+      invalidateDashboardCache('quoteFlags');
+      portfolioPriceStepCache.clear();
       for (const item of dashboardItems) {
         if (item.type === 'summary') {
           resetSummaryItemData(item);
           configureSummaryTimer(item);
-          loadSummaryItem(item.id, { source: 'manual' });
         } else if (item.type === 'flags') {
           clearSummaryTimer(item);
+          cancelDashboardItemRequests(item);
           item.stockOptions = [];
           item.selectedStockKey = '';
           item.selectedStock = null;
@@ -2140,31 +3525,79 @@ async function refreshActiveAccount() {
           item.flags = null;
           item.error = '';
           item.lastUpdatedAt = null;
-          loadFlagsStockOptions(item.id);
+        } else if (item.type === 'portfolioActions') {
+          clearSummaryTimer(item);
+          cancelDashboardItemRequests(item);
+          item.portfolioRows = [];
+          item.portfolioControls = {};
+          item.error = '';
+          item.loading = false;
+          item.stepsLoading = false;
+          item.lastUpdatedAt = null;
         }
       }
-      renderAllDashboardItems();
+      renderAccountDependentItems();
+      scheduleDashboardItemsDataLoad(dashboardItems, {
+        source: options.initial ? 'startup' : 'manual',
+        force: Boolean(options.force)
+      });
     }
   } catch (error) {
+    if (refreshRequestId !== activeAccountRefreshRequestId) {
+      return;
+    }
     activeUsername = '';
     setPaletteEnabled(false);
+    invalidateDashboardCache('operations');
+    invalidateDashboardCache('portfolio');
+    invalidateDashboardCache('quoteFlags');
+    portfolioPriceStepCache.clear();
+    for (const item of dashboardItems) {
+      if (isRefreshableItem(item)) {
+        clearSummaryTimer(item);
+        cancelDashboardItemRequests(item);
+      }
+    }
+    renderAccountDependentItems();
     setStatus(error.message || 'No se pudo cargar la cuenta activa.', 'error');
   }
 }
 
 function handleWindowResize() {
   for (const item of dashboardItems) {
-    constrainItemToCanvas(item);
     updateItemFrame(item);
   }
 }
 
 async function initialize() {
+  const perf = startDashboardPerf('startup');
   syncEmptyState();
   setPaletteEnabled(false);
 
-  await refreshActiveAccount();
+  const layoutListPromise = refreshDashboardLayoutList('', { includeLastLayout: true });
+  const accountPromise = refreshActiveAccount({ initial: true });
+
+  const layoutResponse = await layoutListPromise;
+  if (layoutResponse?.lastLayoutName && !autoLoadedLastLayout) {
+    autoLoadedLastLayout = true;
+    if (layoutResponse.lastLayout) {
+      applyDashboardLayout(layoutResponse.lastLayout);
+      lastDashboardLayoutName = safeText(layoutResponse.lastLayoutName, '').trim();
+      if (layoutSelect) {
+        layoutSelect.value = lastDashboardLayoutName;
+      }
+    } else {
+      await loadDashboardLayoutByName(layoutResponse.lastLayoutName, { silent: true });
+    }
+  }
+
+  await accountPromise;
   setPaletteEnabled(Boolean(activeUsername));
+  finishDashboardPerf(perf, {
+    items: dashboardItems.length,
+    hasAccount: Boolean(activeUsername),
+    lastLayout: lastDashboardLayoutName || ''
+  });
 }
 
 for (const item of paletteItems) {
@@ -2178,6 +3611,7 @@ for (const item of paletteItems) {
 panelToggleButton.addEventListener('click', toggleDashboardPanel);
 saveLayoutButton.addEventListener('click', saveDashboardLayout);
 loadLayoutButton.addEventListener('click', loadDashboardLayout);
+deleteLayoutButton.addEventListener('click', deleteDashboardLayout);
 dashboardCanvas.addEventListener('pointerdown', handleCanvasPointerDown);
 dashboardCanvas.addEventListener('dragover', handleCanvasDragOver);
 dashboardCanvas.addEventListener('drop', handleCanvasDrop);
@@ -2191,9 +3625,10 @@ window.addEventListener('focus', () => {
 });
 window.addEventListener('beforeunload', () => {
   for (const item of dashboardItems) {
-    if (item.type === 'summary' || item.type === 'flags') {
+    if (isRefreshableItem(item)) {
       clearSummaryTimer(item);
     }
+    cancelDashboardItemRequests(item);
   }
 });
 

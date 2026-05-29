@@ -388,6 +388,28 @@ ipcMain.handle('broker:get-quote-flags', async (_event, payload) => {
   }
 });
 
+ipcMain.handle('broker:sell-order', async (_event, payload) => {
+  try {
+    return await runPythonCommand('sell-order', payload || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
+ipcMain.handle('broker:cancel-operation', async (_event, payload) => {
+  try {
+    return await runPythonCommand('cancel-operation', payload || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
 ipcMain.handle('broker:save-dashboard-layout', async (_event, payload) => {
   try {
     return await runPythonCommand('save-dashboard-layout', payload || {});
@@ -402,6 +424,28 @@ ipcMain.handle('broker:save-dashboard-layout', async (_event, payload) => {
 ipcMain.handle('broker:load-dashboard-layout', async (_event, payload) => {
   try {
     return await runPythonCommand('load-dashboard-layout', payload || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
+ipcMain.handle('broker:list-dashboard-layouts', async (_event, payload) => {
+  try {
+    return await runPythonCommand('list-dashboard-layouts', payload || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
+ipcMain.handle('broker:delete-dashboard-layout', async (_event, payload) => {
+  try {
+    return await runPythonCommand('delete-dashboard-layout', payload || {});
   } catch (error) {
     return {
       estado: 'error',

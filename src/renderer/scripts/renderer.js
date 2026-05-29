@@ -140,16 +140,11 @@ function clearSelection() {
   syncDataPanelsVisibility();
 }
 
-function toggleSection(section) {
+function selectSection(section) {
   const normalizedSection = String(section || '').toLowerCase();
-  if (selectedSection === normalizedSection) {
-    clearSelection();
-    return false;
-  }
   selectedSection = normalizedSection;
   setActiveSelection(selectedSection);
   syncDataPanelsVisibility();
-  return true;
 }
 
 function renderError(targetNode, message) {
@@ -426,23 +421,17 @@ async function initialize() {
 }
 
 portfolioButton.addEventListener('click', () => {
-  if (!toggleSection('portfolio')) {
-    return;
-  }
+  selectSection('portfolio');
   loadPortfolio();
 });
 
 accountButton.addEventListener('click', () => {
-  if (!toggleSection('cuenta')) {
-    return;
-  }
+  selectSection('cuenta');
   loadAccountStatus();
 });
 
 operationsButton.addEventListener('click', async () => {
-  if (!toggleSection('operaciones')) {
-    return;
-  }
+  clearSelection();
   try {
     await window.apiBroker.openOperationsWindow();
   } catch (_error) {
@@ -451,9 +440,7 @@ operationsButton.addEventListener('click', async () => {
 });
 
 symbolsButton.addEventListener('click', async () => {
-  if (!toggleSection('simbolos')) {
-    return;
-  }
+  clearSelection();
   try {
     await window.apiBroker.openSymbolsWindow();
   } catch (_error) {
@@ -462,9 +449,7 @@ symbolsButton.addEventListener('click', async () => {
 });
 
 dashboardButton.addEventListener('click', async () => {
-  if (!toggleSection('dashboard')) {
-    return;
-  }
+  clearSelection();
   try {
     await window.apiBroker.openDashboardWindow();
   } catch (_error) {
