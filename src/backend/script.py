@@ -2,6 +2,7 @@ import json
 import os
 import sys
 import base64
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
@@ -14,6 +15,29 @@ REQUEST_TIMEOUT = float(os.getenv("IOL_REQUEST_TIMEOUT_SECONDS", "10"))
 TOKEN_REFRESH_MARGIN_SECONDS = int(os.getenv("IOL_TOKEN_REFRESH_MARGIN_SECONDS", "10"))
 DEFAULT_BEARER_EXPIRATION_SECONDS = int(os.getenv("IOL_DEFAULT_BEARER_EXPIRATION_SECONDS", "900"))
 MAX_STORED_ACCOUNTS = int(os.getenv("IOL_MAX_STORED_ACCOUNTS", "2"))
+SYMBOL_SEARCH_MARKETS = ("bCBA", "nYSE", "nASDAQ", "aMEX", "bCS", "rOFX")
+SYMBOL_SEARCH_COUNTRIES = ("argentina", "estados_Unidos")
+SYMBOL_SEARCH_MARKET_COUNTRY_HINTS = {
+    "bCBA": ("argentina",),
+    "rOFX": ("argentina",),
+    "nYSE": ("estados_Unidos",),
+    "nASDAQ": ("estados_Unidos",),
+    "aMEX": ("estados_Unidos",),
+}
+SYMBOL_SEARCH_MARKET_RESPONSE_ALIASES = {
+    "bCBA": ("bcba", "1"),
+    "nYSE": ("nyse", "2"),
+    "nASDAQ": ("nasdaq", "3"),
+    "aMEX": ("amex", "4"),
+    "bCS": ("bcs",),
+    "rOFX": ("rofx",),
+}
+SYMBOL_SEARCH_REQUEST_TIMEOUT = float(
+    os.getenv("IOL_SYMBOL_SEARCH_TIMEOUT_SECONDS", str(REQUEST_TIMEOUT))
+)
+SYMBOL_SEARCH_MAX_WORKERS = max(1, int(os.getenv("IOL_SYMBOL_SEARCH_MAX_WORKERS", "6")))
+SYMBOL_SEARCH_DEFAULT_INSTRUMENT = os.getenv("IOL_SYMBOL_SEARCH_DEFAULT_INSTRUMENT", "Acciones")
+SYMBOL_SEARCH_ALL_INSTRUMENTS_VALUE = "todos"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -32,6 +56,8 @@ def get_data_dir():
 DATA_DIR = get_data_dir()
 TOKEN_FILE = DATA_DIR / "token.json"
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
+DASHBOARD_LAYOUTS_FILE = DATA_DIR / "dashboard-layouts.json"
+DASHBOARD_LAYOUT_OBJECT_TYPES = {"summary", "tradingview", "flags"}
 
 
 def emit(payload):
@@ -55,6 +81,89 @@ def save_json_file(path, payload):
         os.chmod(path, 0o600)
     except OSError:
         pass
+
+
+def normalize_dashboard_layout_name(value):
+    name = str(value or "").strip()
+    if not name:
+        raise RuntimeError("Debes indicar un nombre de diseño.")
+    if len(name) > 80:
+        raise RuntimeError("El nombre del diseño no puede superar 80 caracteres.")
+    return name
+
+
+def normalize_dashboard_layout_number(value, fallback=0):
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return fallback
+    if number != number or number in (float("inf"), float("-inf")):
+        return fallback
+    return number
+
+
+def normalize_dashboard_layout_item(item):
+    if not isinstance(item, dict):
+        return None
+
+    item_type = str(item.get("type") or "").strip()
+    if item_type not in DASHBOARD_LAYOUT_OBJECT_TYPES:
+        return None
+
+    return {
+        "type": item_type,
+        "x": max(0, normalize_dashboard_layout_number(item.get("x"))),
+        "y": max(0, normalize_dashboard_layout_number(item.get("y"))),
+        "width": max(1, normalize_dashboard_layout_number(item.get("width"), 1)),
+        "height": max(1, normalize_dashboard_layout_number(item.get("height"), 1)),
+        "zIndex": max(1, normalize_dashboard_layout_number(item.get("zIndex"), 1)),
+    }
+
+
+def normalize_dashboard_layout_payload(payload):
+    raw_items = payload.get("items")
+    if raw_items is None and isinstance(payload.get("layout"), dict):
+        raw_items = payload["layout"].get("items")
+    if not isinstance(raw_items, list):
+        raise RuntimeError("El diseño debe incluir una lista de objetos.")
+
+    return {
+        "version": 1,
+        "items": [
+            normalized
+            for normalized in (normalize_dashboard_layout_item(item) for item in raw_items)
+            if normalized is not None
+        ],
+    }
+
+
+def load_dashboard_layout_store():
+    raw = load_json_file(DASHBOARD_LAYOUTS_FILE)
+    layouts = raw.get("layouts") if isinstance(raw, dict) else {}
+    if not isinstance(layouts, dict):
+        layouts = {}
+    return {"layouts": layouts}
+
+
+def save_dashboard_layout(name, layout):
+    normalized_layout = normalize_dashboard_layout_payload(layout)
+    store = load_dashboard_layout_store()
+    stored_layout = {
+        "name": name,
+        "version": normalized_layout.get("version", 1),
+        "items": normalized_layout.get("items", []),
+    }
+    store["layouts"][name] = stored_layout
+    save_json_file(DASHBOARD_LAYOUTS_FILE, store)
+    return stored_layout
+
+
+def get_dashboard_layout(name):
+    store = load_dashboard_layout_store()
+    layout = store["layouts"].get(name)
+    if not isinstance(layout, dict):
+        raise RuntimeError(f"No existe un diseño guardado con el nombre '{name}'.")
+    return normalize_dashboard_layout_payload(layout)
 
 
 def normalize_username(value):
@@ -680,6 +789,77 @@ def get_operations(access_token, filters):
     return normalize_operations(response.json())
 
 
+def normalize_quote_flag_number(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    return value
+
+
+def normalize_quote_flags_payload(payload, market="", symbol=""):
+    if not isinstance(payload, dict):
+        return {
+            "simbolo": normalize_symbol_search_text(symbol).upper(),
+            "mercado": normalize_symbol_search_market(market),
+            "puntas": [],
+        }
+
+    normalized_symbol = normalize_symbol_search_text(payload.get("simbolo") or symbol).upper()
+    normalized_market = resolve_symbol_market(payload.get("mercado") or market)
+    raw_flags = payload.get("puntas")
+    if isinstance(raw_flags, dict):
+        raw_flags = [raw_flags]
+    if not isinstance(raw_flags, list):
+        raw_flags = []
+
+    flags = []
+    for item in raw_flags:
+        if not isinstance(item, dict):
+            continue
+        flags.append(
+            {
+                "cantidadCompra": normalize_quote_flag_number(item.get("cantidadCompra")),
+                "precioCompra": normalize_quote_flag_number(item.get("precioCompra")),
+                "precioVenta": normalize_quote_flag_number(item.get("precioVenta")),
+                "cantidadVenta": normalize_quote_flag_number(item.get("cantidadVenta")),
+            }
+        )
+
+    return {
+        "simbolo": normalized_symbol,
+        "mercado": normalized_market,
+        "descripcionTitulo": normalize_symbol_search_text(payload.get("descripcionTitulo")),
+        "ultimoPrecio": payload.get("ultimoPrecio"),
+        "variacion": payload.get("variacion"),
+        "tendencia": normalize_symbol_search_text(payload.get("tendencia")),
+        "fechaHora": payload.get("fechaHora"),
+        "moneda": normalize_symbol_currency(payload.get("moneda")),
+        "operableCompra": payload.get("operableCompra"),
+        "operableVenta": payload.get("operableVenta"),
+        "visible": payload.get("visible"),
+        "puntas": flags,
+    }
+
+
+def get_quote_flags(access_token, market, symbol):
+    normalized_market = normalize_symbol_search_market(market)
+    normalized_symbol = normalize_symbol_search_text(symbol).upper()
+    if not normalized_symbol:
+        raise RuntimeError("Debes indicar un símbolo para consultar puntas.")
+
+    response = requests.get(
+        f"{BASE_URL}/api/v2/{normalized_market}/Titulos/{normalized_symbol}/CotizacionDetalle",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    return normalize_quote_flags_payload(response.json(), normalized_market, normalized_symbol)
+
+
 def map_currency_symbol(moneda):
     currency = str(moneda or "").strip().lower()
     if "peso" in currency and "argent" in currency:
@@ -723,6 +903,347 @@ def get_account_status(access_token):
     )
     response.raise_for_status()
     return normalize_account_status(response.json())
+
+
+def get_symbol_search_config():
+    return {
+        "estado": "ok",
+        "mercado_default": SYMBOL_SEARCH_MARKETS[0],
+        "mercados": [{"codigo": market, "nombre": market} for market in SYMBOL_SEARCH_MARKETS],
+        "paises_consultados": list(SYMBOL_SEARCH_COUNTRIES),
+    }
+
+
+def normalize_symbol_search_market(value):
+    requested = str(value or "").strip()
+    if not requested:
+        return SYMBOL_SEARCH_MARKETS[0]
+
+    for market in SYMBOL_SEARCH_MARKETS:
+        if requested.lower() == market.lower():
+            return market
+
+    supported = ", ".join(SYMBOL_SEARCH_MARKETS)
+    raise RuntimeError(f"Mercado inválido: {requested}. Valores soportados: {supported}.")
+
+
+def get_symbol_search_countries_for_market(market):
+    normalized_market = normalize_symbol_search_market(market)
+    preferred = SYMBOL_SEARCH_MARKET_COUNTRY_HINTS.get(normalized_market, ())
+    return tuple(preferred) + tuple(country for country in SYMBOL_SEARCH_COUNTRIES if country not in preferred)
+
+
+def resolve_symbol_market(value):
+    raw = normalize_symbol_search_text(value)
+    if not raw:
+        return ""
+    normalized = raw.lower()
+
+    for market, aliases in SYMBOL_SEARCH_MARKET_RESPONSE_ALIASES.items():
+        if normalized in aliases:
+            return market
+
+    try:
+        return normalize_symbol_search_market(raw)
+    except RuntimeError:
+        return raw
+
+
+def normalize_symbol_currency(value):
+    raw = normalize_symbol_search_text(value)
+    normalized = raw.lower()
+    if normalized in {"1", "peso_argentino", "pesos", "ars", "ar$"}:
+        return "AR$"
+    if normalized in {"2", "dolar_estadounidense", "dólar_estadounidense", "dolar", "dólar", "usd"}:
+        return "USD"
+    return raw
+
+
+def normalize_symbol_search_text(value):
+    if value is None:
+        return ""
+    return str(value).strip()
+
+
+def normalize_symbol_search_instrument(value):
+    text = normalize_symbol_search_text(value)
+    if not text:
+        return SYMBOL_SEARCH_DEFAULT_INSTRUMENT
+    if text.lower() == SYMBOL_SEARCH_ALL_INSTRUMENTS_VALUE:
+        return SYMBOL_SEARCH_ALL_INSTRUMENTS_VALUE
+    return text
+
+
+def instrument_matches(requested, candidate):
+    requested_text = normalize_symbol_search_text(requested).lower()
+    candidate_text = normalize_symbol_search_text(candidate).lower()
+    return bool(requested_text and candidate_text and requested_text == candidate_text)
+
+
+def first_non_empty(item, keys):
+    for key in keys:
+        value = normalize_symbol_search_text(item.get(key))
+        if value:
+            return value
+    return ""
+
+
+def normalize_symbol_quote(item, country, instrument):
+    if not isinstance(item, dict):
+        return None
+
+    symbol = normalize_symbol_search_text(item.get("simbolo")).upper()
+    if not symbol:
+        return None
+
+    raw_market = normalize_symbol_search_text(item.get("mercado"))
+    market = resolve_symbol_market(raw_market)
+    description = first_non_empty(item, ["descripcion", "descripcionTitulo"])
+    quote_type = first_non_empty(item, ["tipo", "tipoOpcion"]) or normalize_symbol_search_text(instrument)
+    puntas = item.get("puntas") if isinstance(item.get("puntas"), dict) else {}
+
+    return {
+        "simbolo": symbol,
+        "descripcion": description,
+        "mercado": market,
+        "mercadoCodigo": raw_market,
+        "pais": normalize_symbol_search_text(item.get("pais")) or country,
+        "instrumento": normalize_symbol_search_text(instrument),
+        "tipo": quote_type,
+        "moneda": normalize_symbol_currency(item.get("moneda")),
+        "monedaCodigo": normalize_symbol_search_text(item.get("moneda")),
+        "plazo": normalize_symbol_search_text(item.get("plazo")),
+        "ultimoPrecio": item.get("ultimoPrecio"),
+        "variacionPorcentual": item.get("variacionPorcentual"),
+        "apertura": item.get("apertura"),
+        "maximo": item.get("maximo"),
+        "minimo": item.get("minimo"),
+        "ultimoCierre": item.get("ultimoCierre"),
+        "volumen": item.get("volumen"),
+        "cantidadOperaciones": item.get("cantidadOperaciones"),
+        "fecha": item.get("fecha"),
+        "laminaMinima": item.get("laminaMinima"),
+        "lote": item.get("lote"),
+        "puntas": {
+            "cantidadCompra": puntas.get("cantidadCompra"),
+            "precioCompra": puntas.get("precioCompra"),
+            "precioVenta": puntas.get("precioVenta"),
+            "cantidadVenta": puntas.get("cantidadVenta"),
+        },
+    }
+
+
+def normalize_symbol_quotes_payload(payload, country, instrument):
+    raw_symbols = []
+    if isinstance(payload, dict):
+        raw_symbols = payload.get("titulos") or []
+    elif isinstance(payload, list):
+        raw_symbols = payload
+
+    if not isinstance(raw_symbols, list):
+        return []
+
+    normalized = []
+    for item in raw_symbols:
+        symbol = normalize_symbol_quote(item, country, instrument)
+        if symbol:
+            normalized.append(symbol)
+    return normalized
+
+
+def symbol_search_key(symbol):
+    return "::".join(
+        [
+            normalize_symbol_search_text(symbol.get("mercado")).lower(),
+            normalize_symbol_search_text(symbol.get("simbolo")).lower(),
+            normalize_symbol_search_text(symbol.get("plazo")).lower(),
+            normalize_symbol_search_text(symbol.get("moneda")).lower(),
+            normalize_symbol_search_text(symbol.get("instrumento")).lower(),
+        ]
+    )
+
+
+def filter_symbols_by_market(symbols, market):
+    target_market = normalize_symbol_search_market(market).lower()
+    filtered = []
+    seen = set()
+
+    for symbol in symbols:
+        symbol_market = resolve_symbol_market(symbol.get("mercado")).lower()
+        if symbol_market != target_market:
+            continue
+
+        key = symbol_search_key(symbol)
+        if key in seen:
+            continue
+        seen.add(key)
+        filtered.append(symbol)
+
+    return sorted(
+        filtered,
+        key=lambda item: (
+            normalize_symbol_search_text(item.get("simbolo")),
+            normalize_symbol_search_text(item.get("plazo")),
+            normalize_symbol_search_text(item.get("moneda")),
+        ),
+    )
+
+
+def get_quote_instruments(access_token, country):
+    response = requests.get(
+        f"{BASE_URL}/api/v2/{country}/Titulos/Cotizacion/Instrumentos",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=SYMBOL_SEARCH_REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, list):
+        return []
+
+    instruments = []
+    seen = set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        instrument = normalize_symbol_search_text(item.get("instrumento"))
+        if not instrument:
+            continue
+        key = instrument.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        instruments.append(instrument)
+
+    return instruments
+
+
+def get_quote_symbols(access_token, country, instrument):
+    response = requests.get(
+        f"{BASE_URL}/api/v2/Cotizaciones/{instrument}/{country}/Todos",
+        headers={"Authorization": f"Bearer {access_token}"},
+        timeout=SYMBOL_SEARCH_REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    return normalize_symbol_quotes_payload(response.json(), country, instrument)
+
+
+def get_symbols_for_countries(access_token, countries, instrument_filter):
+    all_symbols = []
+    errors = []
+    attempted_quote_requests = 0
+    successful_quote_requests = 0
+    consulted_countries = []
+    quote_requests = []
+    available_instruments = []
+
+    for country in countries:
+        try:
+            instruments = get_quote_instruments(access_token, country)
+        except requests.exceptions.RequestException as exc:
+            errors.append(f"{country}: instrumentos: {exc}")
+            continue
+
+        consulted_countries.append(country)
+        for instrument in instruments:
+            if instrument not in available_instruments:
+                available_instruments.append(instrument)
+
+        selected_instruments = instruments
+        if instrument_filter != SYMBOL_SEARCH_ALL_INSTRUMENTS_VALUE:
+            selected_instruments = [
+                instrument for instrument in instruments if instrument_matches(instrument_filter, instrument)
+            ]
+            if not selected_instruments:
+                errors.append(f"{country}: instrumento no disponible: {instrument_filter}")
+
+        for instrument in selected_instruments:
+            quote_requests.append((country, instrument))
+
+    attempted_quote_requests = len(quote_requests)
+    if quote_requests:
+        worker_count = min(SYMBOL_SEARCH_MAX_WORKERS, len(quote_requests))
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            future_map = {
+                executor.submit(get_quote_symbols, access_token, country, instrument): (country, instrument)
+                for country, instrument in quote_requests
+            }
+            for future in as_completed(future_map):
+                country, instrument = future_map[future]
+                try:
+                    all_symbols.extend(future.result())
+                    successful_quote_requests += 1
+                except requests.exceptions.RequestException as exc:
+                    errors.append(f"{country}/{instrument}: {exc}")
+                except Exception as exc:
+                    errors.append(f"{country}/{instrument}: {exc}")
+
+    return {
+        "symbols": all_symbols,
+        "errors": errors,
+        "consulted_countries": consulted_countries,
+        "available_instruments": available_instruments,
+        "attempted_quote_requests": attempted_quote_requests,
+        "successful_quote_requests": successful_quote_requests,
+    }
+
+
+def get_symbols_for_market(access_token, market, instrument=None):
+    normalized_market = normalize_symbol_search_market(market)
+    instrument_filter = normalize_symbol_search_instrument(instrument)
+    countries = get_symbol_search_countries_for_market(normalized_market)
+    all_symbols = []
+    errors = []
+    consulted_countries = []
+    available_instruments = []
+    attempted_quote_requests = 0
+    successful_quote_requests = 0
+
+    for country in countries:
+        batch = get_symbols_for_countries(access_token, (country,), instrument_filter)
+        all_symbols.extend(batch["symbols"])
+        errors.extend(batch["errors"])
+        consulted_countries.extend(batch["consulted_countries"])
+        for available_instrument in batch["available_instruments"]:
+            if available_instrument not in available_instruments:
+                available_instruments.append(available_instrument)
+        attempted_quote_requests += batch["attempted_quote_requests"]
+        successful_quote_requests += batch["successful_quote_requests"]
+
+        filtered_symbols = filter_symbols_by_market(all_symbols, normalized_market)
+        if filtered_symbols:
+            return {
+                "mercado": normalized_market,
+                "instrumento": instrument_filter,
+                "instrumentosDisponibles": available_instruments,
+                "simbolos": filtered_symbols,
+                "consultas": {
+                    "paises": consulted_countries,
+                    "instrumentos": attempted_quote_requests,
+                    "exitosas": successful_quote_requests,
+                },
+                "errores": errors[:8],
+            }
+
+    if attempted_quote_requests == 0 and errors:
+        detail = " | ".join(errors[:4])
+        raise RuntimeError(f"No se pudieron consultar instrumentos para {normalized_market}: {detail}")
+
+    if attempted_quote_requests > 0 and successful_quote_requests == 0:
+        detail = " | ".join(errors[:4]) or "sin detalle"
+        raise RuntimeError(f"No se pudieron consultar símbolos para {normalized_market}: {detail}")
+
+    return {
+        "mercado": normalized_market,
+        "instrumento": instrument_filter,
+        "instrumentosDisponibles": available_instruments,
+        "simbolos": filter_symbols_by_market(all_symbols, normalized_market),
+        "consultas": {
+            "paises": consulted_countries,
+            "instrumentos": attempted_quote_requests,
+            "exitosas": successful_quote_requests,
+        },
+        "errores": errors[:8],
+    }
 
 
 def get_current_token_data():
@@ -826,6 +1347,49 @@ def fetch_account_status(payload=None):
         )
 
 
+def fetch_symbol_search_config(_payload=None):
+    emit(get_symbol_search_config())
+
+
+def fetch_symbols(payload=None):
+    payload = payload or {}
+    try:
+        market = normalize_symbol_search_market(payload.get("mercado"))
+    except RuntimeError as exc:
+        emit({"estado": "error", "mensaje": str(exc), "config": get_symbol_search_config()})
+        return
+
+    target_username = normalize_username(payload.get("username"))
+    try:
+        access_token, source = get_access_token(target_username)
+    except Exception as exc:
+        emit(
+            {
+                "estado": "desconectado",
+                "mensaje": f"No se pudo obtener un token válido: {exc}",
+            }
+        )
+        return
+
+    try:
+        data = get_symbols_for_market(access_token, market, payload.get("instrumento"))
+        emit(
+            {
+                "estado": "ok",
+                "token_source": source,
+                **data,
+            }
+        )
+    except RuntimeError as exc:
+        emit(
+            {
+                "estado": "error",
+                "mensaje": str(exc),
+                "mercado": market,
+            }
+        )
+
+
 def fetch_operations(payload):
     try:
         filters = build_operations_filters(payload)
@@ -866,6 +1430,103 @@ def fetch_operations(payload):
                 "mensaje": f"Error al consultar operaciones: {exc}",
             }
         )
+
+
+def fetch_quote_flags(payload):
+    payload = payload or {}
+    market = payload.get("mercado")
+    symbol = payload.get("simbolo")
+
+    try:
+        normalized_market = normalize_symbol_search_market(market)
+        normalized_symbol = normalize_symbol_search_text(symbol).upper()
+        if not normalized_symbol:
+            raise RuntimeError("Debes indicar un símbolo para consultar puntas.")
+    except RuntimeError as exc:
+        emit(
+            {
+                "estado": "error",
+                "mensaje": str(exc),
+            }
+        )
+        return
+
+    target_username = normalize_username(payload.get("username"))
+    try:
+        access_token, source = get_access_token(target_username)
+    except Exception as exc:
+        emit(
+            {
+                "estado": "desconectado",
+                "mensaje": f"No se pudo obtener un token válido: {exc}",
+            }
+        )
+        return
+
+    try:
+        quote_flags = get_quote_flags(access_token, normalized_market, normalized_symbol)
+        emit(
+            {
+                "estado": "ok",
+                "token_source": source,
+                "cotizacion": quote_flags,
+            }
+        )
+    except requests.exceptions.RequestException as exc:
+        emit(
+            {
+                "estado": "error",
+                "mensaje": f"Error al consultar puntas: {exc}",
+                "mercado": normalized_market,
+                "simbolo": normalized_symbol,
+            }
+        )
+    except RuntimeError as exc:
+        emit(
+            {
+                "estado": "error",
+                "mensaje": str(exc),
+                "mercado": normalized_market,
+                "simbolo": normalized_symbol,
+            }
+        )
+
+
+def fetch_save_dashboard_layout(payload):
+    payload = payload or {}
+    try:
+        name = normalize_dashboard_layout_name(payload.get("name"))
+        layout = normalize_dashboard_layout_payload(payload)
+        stored_layout = save_dashboard_layout(name, layout)
+    except RuntimeError as exc:
+        emit({"estado": "error", "mensaje": str(exc)})
+        return
+
+    emit(
+        {
+            "estado": "ok",
+            "mensaje": f"Diseño guardado: {name}.",
+            "layout": stored_layout,
+        }
+    )
+
+
+def fetch_load_dashboard_layout(payload):
+    payload = payload or {}
+    try:
+        name = normalize_dashboard_layout_name(payload.get("name"))
+        layout = get_dashboard_layout(name)
+    except RuntimeError as exc:
+        emit({"estado": "error", "mensaje": str(exc)})
+        return
+
+    emit(
+        {
+            "estado": "ok",
+            "name": name,
+            "layout": layout,
+        }
+    )
 
 
 def list_accounts():
@@ -1063,8 +1724,23 @@ def main():
     if command == "account-status":
         fetch_account_status(payload)
         return
+    if command == "symbol-search-config":
+        fetch_symbol_search_config(payload)
+        return
+    if command == "symbols":
+        fetch_symbols(payload)
+        return
     if command == "operations":
         fetch_operations(payload)
+        return
+    if command == "quote-flags":
+        fetch_quote_flags(payload)
+        return
+    if command == "save-dashboard-layout":
+        fetch_save_dashboard_layout(payload)
+        return
+    if command == "load-dashboard-layout":
+        fetch_load_dashboard_layout(payload)
         return
     if command == "list-accounts":
         list_accounts()

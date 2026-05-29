@@ -7,10 +7,16 @@ const PRELOAD_PATH = path.join(__dirname, 'preload.js');
 const RENDERER_DIR = path.join(__dirname, '..', 'renderer');
 const PROJECT_ROOT = path.join(__dirname, '..', '..');
 const BACKEND_SCRIPT_PATH = path.join(__dirname, '..', 'backend', 'script.py');
+const SYMBOL_SEARCH_COMMAND_TIMEOUT_MS = Number.parseInt(
+  process.env.BROKERAPP_SYMBOL_SEARCH_TIMEOUT_MS || '45000',
+  10
+) || 45000;
 
 let mainWindow = null;
 let loginWindow = null;
 let operationsWindow = null;
+let symbolsWindow = null;
+let dashboardWindow = null;
 
 function isExecutableFile(filePath) {
   try {
@@ -70,7 +76,7 @@ function lockDownWindow(win) {
   });
 }
 
-function runPythonCommand(command, payload = null) {
+function runPythonCommand(command, payload = null, options = {}) {
   return new Promise((resolve, reject) => {
     const backendRuntime = getBackendRuntime();
     const args = [...backendRuntime.args, command];
@@ -89,6 +95,15 @@ function runPythonCommand(command, payload = null) {
 
     let stdout = '';
     let stderr = '';
+    let timedOut = false;
+    let timeoutId = null;
+
+    if (options.timeoutMs && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0) {
+      timeoutId = setTimeout(() => {
+        timedOut = true;
+        child.kill();
+      }, options.timeoutMs);
+    }
 
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
@@ -102,10 +117,22 @@ function runPythonCommand(command, payload = null) {
     });
 
     child.on('error', (error) => {
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
       reject(new Error(`No se pudo iniciar backend (${backendRuntime.command}): ${error.message}`));
     });
 
     child.on('close', (code) => {
+      if (timeoutId !== null) {
+        clearTimeout(timeoutId);
+      }
+
+      if (timedOut) {
+        reject(new Error(`Python excedió el tiempo máximo (${options.timeoutMs}ms) para ${command}.`));
+        return;
+      }
+
       const lines = stdout
         .split(/\r?\n/)
         .map((line) => line.trim())
@@ -218,6 +245,72 @@ function createOperationsWindow() {
   });
 }
 
+function createSymbolsWindow() {
+  if (symbolsWindow && !symbolsWindow.isDestroyed()) {
+    symbolsWindow.focus();
+    return;
+  }
+
+  symbolsWindow = new BrowserWindow({
+    x: 0,
+    y: 0,
+    width: 1180,
+    height: 820,
+    minWidth: 920,
+    minHeight: 640,
+    webPreferences: {
+      preload: PRELOAD_PATH,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  lockDownWindow(symbolsWindow);
+  symbolsWindow.loadFile(path.join(RENDERER_DIR, 'simbolos.html'));
+  symbolsWindow.once('ready-to-show', () => {
+    if (!symbolsWindow || symbolsWindow.isDestroyed()) {
+      return;
+    }
+    symbolsWindow.maximize();
+  });
+  symbolsWindow.on('closed', () => {
+    symbolsWindow = null;
+  });
+}
+
+function createDashboardWindow() {
+  if (dashboardWindow && !dashboardWindow.isDestroyed()) {
+    dashboardWindow.focus();
+    return;
+  }
+
+  dashboardWindow = new BrowserWindow({
+    x: 0,
+    y: 0,
+    width: 1320,
+    height: 880,
+    minWidth: 960,
+    minHeight: 640,
+    webPreferences: {
+      preload: PRELOAD_PATH,
+      contextIsolation: true,
+      nodeIntegration: false
+    }
+  });
+
+  lockDownWindow(dashboardWindow);
+  dashboardWindow.loadFile(path.join(RENDERER_DIR, 'dashboard.html'));
+  dashboardWindow.once('ready-to-show', () => {
+    if (!dashboardWindow || dashboardWindow.isDestroyed()) {
+      return;
+    }
+    dashboardWindow.maximize();
+  });
+  dashboardWindow.on('closed', () => {
+    dashboardWindow = null;
+  });
+}
+
 ipcMain.handle('broker:check-token', async (_event, payload) => {
   try {
     return await runPythonCommand('check-token', payload || {});
@@ -251,9 +344,64 @@ ipcMain.handle('broker:get-account-status', async (_event, payload) => {
   }
 });
 
+ipcMain.handle('broker:get-symbol-search-config', async (_event, payload) => {
+  try {
+    return await runPythonCommand('symbol-search-config', payload || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
+ipcMain.handle('broker:get-symbols', async (_event, payload) => {
+  try {
+    return await runPythonCommand('symbols', payload || {}, { timeoutMs: SYMBOL_SEARCH_COMMAND_TIMEOUT_MS });
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
 ipcMain.handle('broker:get-operations', async (_event, filters) => {
   try {
     return await runPythonCommand('operations', filters || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
+ipcMain.handle('broker:get-quote-flags', async (_event, payload) => {
+  try {
+    return await runPythonCommand('quote-flags', payload || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
+ipcMain.handle('broker:save-dashboard-layout', async (_event, payload) => {
+  try {
+    return await runPythonCommand('save-dashboard-layout', payload || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
+ipcMain.handle('broker:load-dashboard-layout', async (_event, payload) => {
+  try {
+    return await runPythonCommand('load-dashboard-layout', payload || {});
   } catch (error) {
     return {
       estado: 'error',
@@ -267,12 +415,28 @@ ipcMain.handle('broker:open-operations-window', () => {
   return { estado: 'ok' };
 });
 
+ipcMain.handle('broker:open-symbols-window', () => {
+  createSymbolsWindow();
+  return { estado: 'ok' };
+});
+
+ipcMain.handle('broker:open-dashboard-window', () => {
+  createDashboardWindow();
+  return { estado: 'ok' };
+});
+
 ipcMain.handle('broker:logout', async () => {
   try {
     const response = await runPythonCommand('logout');
     if (response.estado === 'ok') {
       if (operationsWindow && !operationsWindow.isDestroyed()) {
         operationsWindow.close();
+      }
+      if (symbolsWindow && !symbolsWindow.isDestroyed()) {
+        symbolsWindow.close();
+      }
+      if (dashboardWindow && !dashboardWindow.isDestroyed()) {
+        dashboardWindow.close();
       }
       createLoginWindow();
     }

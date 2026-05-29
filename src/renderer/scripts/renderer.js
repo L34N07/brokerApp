@@ -1,6 +1,8 @@
 const portfolioButton = document.getElementById('btn-load-portfolio');
 const accountButton = document.getElementById('btn-load-account-status');
 const operationsButton = document.getElementById('btn-open-operations');
+const symbolsButton = document.getElementById('btn-open-symbols');
+const dashboardButton = document.getElementById('btn-open-dashboard');
 const logoutButton = document.getElementById('btn-logout');
 const dataGrid = document.getElementById('data-grid');
 const portfolioContainer = document.getElementById('portfolio');
@@ -95,6 +97,8 @@ function setActionsEnabled(enabled) {
   portfolioButton.disabled = !enabled;
   accountButton.disabled = !enabled;
   operationsButton.disabled = !enabled;
+  symbolsButton.disabled = !enabled;
+  dashboardButton.disabled = !enabled;
   logoutButton.disabled = !enabled;
   if (!enabled) {
     selectedSection = null;
@@ -108,7 +112,9 @@ function setActiveSelection(section) {
   const buttonMap = new Map([
     [portfolioButton, 'portfolio'],
     [accountButton, 'cuenta'],
-    [operationsButton, 'operaciones']
+    [operationsButton, 'operaciones'],
+    [symbolsButton, 'simbolos'],
+    [dashboardButton, 'dashboard']
   ]);
 
   for (const [button, buttonSection] of buttonMap.entries()) {
@@ -441,6 +447,28 @@ operationsButton.addEventListener('click', async () => {
     await window.apiBroker.openOperationsWindow();
   } catch (_error) {
     setStatus('No se pudo abrir la pestaña de operaciones.', 'error');
+  }
+});
+
+symbolsButton.addEventListener('click', async () => {
+  if (!toggleSection('simbolos')) {
+    return;
+  }
+  try {
+    await window.apiBroker.openSymbolsWindow();
+  } catch (_error) {
+    setStatus('No se pudo abrir la pestaña de símbolos.', 'error');
+  }
+});
+
+dashboardButton.addEventListener('click', async () => {
+  if (!toggleSection('dashboard')) {
+    return;
+  }
+  try {
+    await window.apiBroker.openDashboardWindow();
+  } catch (_error) {
+    setStatus('No se pudo abrir el dashboard.', 'error');
   }
 });
 

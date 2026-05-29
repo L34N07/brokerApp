@@ -16,6 +16,7 @@ src/
     login.html             Login and saved-account screen
     index.html             Main portfolio/account-status screen
     operaciones.html       Operations screen
+    simbolos.html          Symbol search screen
     scripts/               Renderer JavaScript
     styles/                Renderer CSS
   backend/
@@ -56,6 +57,8 @@ Supported backend commands are visible in `src/backend/script.py` and include:
 - `check-token`
 - `portfolio`
 - `account-status`
+- `symbol-search-config`
+- `symbols`
 - `operations`
 
 In development, Electron chooses Python in this order:
@@ -111,6 +114,48 @@ PYTHON_BIN=/path/to/python npm start
 
 The login screen lets you add/select/delete saved IOL accounts. The app stores account/token data outside the app source when launched through Electron by setting `BROKERAPP_DATA_DIR` to Electron's user-data directory.
 
+## Symbol Search Window
+
+The main screen includes a **Símbolos** navigation entry. It opens a separate Electron window, matching the existing **Operaciones** window behavior. The window lets you select a documented IOL market and search the symbols returned for that market.
+
+The symbol search flow is:
+
+1. The renderer asks `symbol-search-config` for the supported market values from the local API documentation: `bCBA`, `nYSE`, `nASDAQ`, `aMEX`, `bCS`, and `rOFX`.
+2. When a market and instrument are selected, the renderer calls the `symbols` backend command.
+3. The backend gets a valid IOL token using the same token/refresh logic as the rest of the app.
+4. The backend discovers available instruments for the documented country values `argentina` and `estados_Unidos` through:
+
+```text
+GET /api/v2/{pais}/Titulos/Cotizacion/Instrumentos
+```
+
+5. By default, it loads stocks with the `Acciones` instrument through:
+
+```text
+GET /api/v2/Cotizaciones/{Instrumento}/{Pais}/Todos
+```
+
+6. The backend filters the returned `titulos` by the selected `mercado` field and returns normalized symbol rows to the renderer. The IOL quote-list response can return numeric market codes, so the backend maps those codes back to the documented market names before filtering.
+
+To keep the window responsive, symbol lookup uses a shorter per-request timeout than the rest of the API by default, runs instrument quote requests in parallel, and starts with the most likely country for the selected market before falling back to the other documented country.
+
+Search filtering is client-side after the market symbols are loaded. It matches useful fields from the API response, including symbol, description, market, country, instrument/type, currency, and term. Results are displayed as compact rows: symbol and description on the left, currency and last price on the right. The instrument selector defaults to `Acciones` so stock searches such as `YPFD` are not mixed with option contracts.
+
+Selecting a row marks it as the active symbol and loads a TradingView Advanced Chart widget for that symbol. TradingView symbols use `{exchange}:{symbol}` format, so the renderer maps IOL markets before embedding the chart:
+
+| IOL market | TradingView exchange |
+| --- | --- |
+| `bCBA` | `BCBA` |
+| `nYSE` | `NYSE` |
+| `nASDAQ` | `NASDAQ` |
+| `aMEX` | `AMEX` |
+| `bCS` | `BCS` |
+| `rOFX` | `ROFX` |
+
+The embedded chart is intended for `Acciones`. If the selected row has no known TradingView exchange format or is not a stock instrument, the chart area shows a non-crashing unsupported-state message while search remains usable.
+
+No additional setup or configuration is required for this window.
+
 ## Backend CLI
 
 You can run backend commands directly for quick checks:
@@ -147,6 +192,10 @@ The backend reads these environment variables:
 | `IOL_API_BASE_URL` | `https://api.invertironline.com` | IOL API base URL |
 | `IOL_PORTFOLIO_COUNTRY` | `argentina` | Country segment for portfolio requests |
 | `IOL_REQUEST_TIMEOUT_SECONDS` | `10` | HTTP request timeout |
+| `IOL_SYMBOL_SEARCH_TIMEOUT_SECONDS` | `IOL_REQUEST_TIMEOUT_SECONDS` | Per-request timeout for symbol search instrument/quote calls |
+| `IOL_SYMBOL_SEARCH_MAX_WORKERS` | `6` | Maximum parallel quote requests for symbol search |
+| `IOL_SYMBOL_SEARCH_DEFAULT_INSTRUMENT` | `Acciones` | Default instrument loaded in the symbol search window |
+| `BROKERAPP_SYMBOL_SEARCH_TIMEOUT_MS` | `45000` | Electron-side timeout for the full `symbols` backend command |
 | `IOL_TOKEN_REFRESH_MARGIN_SECONDS` | `10` | Token refresh safety margin |
 | `IOL_DEFAULT_BEARER_EXPIRATION_SECONDS` | `900` | Fallback bearer token lifetime |
 | `IOL_MAX_STORED_ACCOUNTS` | `2` | Maximum saved accounts |

@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dashboard - Panel IOL</title>
+  <link rel="stylesheet" href="./styles/common.css">
+  <link rel="stylesheet" href="./styles/operations.css">
+  <link rel="stylesheet" href="./styles/symbols.css">
+  <link rel="stylesheet" href="./styles/dashboard.css">
+</head>
+<body>
+  <main class="layout dashboard-layout">
+    <section id="dashboard-shell" class="panel dashboard-shell">
+      <div class="top-bar dashboard-top-bar">
+        <div class="main-tabs">
+          <button type="button" class="main-tab-btn active">Dashboard</button>
+        </div>
+
+        <div class="top-actions">
+          <input id="dashboard-layout-name" class="dashboard-layout-name" type="text" maxlength="80" placeholder="Nombre diseño" aria-label="Nombre del diseño">
+          <button id="btn-save-dashboard-layout" class="dashboard-layout-action" type="button">Guardar Diseño</button>
+          <button id="btn-load-dashboard-layout" class="dashboard-layout-action" type="button">Cargar Diseño</button>
+          <button id="btn-toggle-dashboard-panel" class="menu-btn" type="button" aria-label="Mostrar objetos" aria-expanded="true" title="Objetos">
+            <img src="./assets/dashboard-menu.png" alt="" aria-hidden="true">
+          </button>
+        </div>
+      </div>
+
+      <section class="dashboard-workspace">
+        <section id="dashboard-canvas" class="dashboard-canvas" aria-label="Dashboard canvas">
+          <p id="dashboard-empty" class="dashboard-empty-state">Sin objetos en el dashboard.</p>
+        </section>
+
+        <aside id="dashboard-panel" class="dashboard-panel" aria-label="Objetos del dashboard">
+          <div class="dashboard-panel-head">
+            <h2>Objetos</h2>
+          </div>
+
+          <div class="dashboard-object-list">
+            <button type="button" class="dashboard-palette-item" draggable="true" data-dashboard-object-type="summary">
+              <span class="dashboard-palette-title">Resumen operaciones</span>
+              <span class="dashboard-palette-meta">Operaciones por símbolo</span>
+            </button>
+
+            <button type="button" class="dashboard-palette-item" draggable="true" data-dashboard-object-type="tradingview">
+              <span class="dashboard-palette-title">TradingView</span>
+              <span class="dashboard-palette-meta">Panel interactivo</span>
+            </button>
+
+            <button type="button" class="dashboard-palette-item" draggable="true" data-dashboard-object-type="flags">
+              <span class="dashboard-palette-title">Puntas compra/venta</span>
+              <span class="dashboard-palette-meta">Portfolio y operaciones</span>
+            </button>
+          </div>
+        </aside>
+      </section>
+    </section>
+  </main>
+
+  <script src="./scripts/dashboard.js"></script>
+</body>
+</html>

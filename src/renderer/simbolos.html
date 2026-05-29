@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Símbolos - Panel IOL</title>
+  <link rel="stylesheet" href="./styles/common.css">
+  <link rel="stylesheet" href="./styles/operations.css">
+  <link rel="stylesheet" href="./styles/symbols.css">
+</head>
+<body>
+  <main class="layout">
+    <section class="panel">
+      <div class="top-bar">
+        <div class="main-tabs">
+          <button type="button" class="main-tab-btn active">Buscar símbolos</button>
+        </div>
+
+        <div class="top-actions">
+          <span id="symbols-refresh-text" class="refresh-time">Mercado: --</span>
+          <button id="btn-reload-symbols" class="menu-btn" type="button" aria-label="Recargar símbolos" title="Recargar símbolos">
+            <span aria-hidden="true">↻</span>
+          </button>
+        </div>
+      </div>
+
+      <section class="tab-panel active">
+        <section class="filters-card symbols-filters">
+          <div class="filters-line">
+            <div class="filter-group">
+              <label for="symbol-market">Mercado</label>
+              <select id="symbol-market" class="filter-input"></select>
+            </div>
+
+            <div class="filter-group">
+              <label for="symbol-instrument">Instrumento</label>
+              <select id="symbol-instrument" class="filter-input">
+                <option value="Acciones" selected>Acciones</option>
+              </select>
+            </div>
+
+            <div class="filter-group">
+              <label for="symbol-search">Buscar</label>
+              <input id="symbol-search" class="filter-input" type="search" autocomplete="off" placeholder="Símbolo, descripción, moneda">
+            </div>
+          </div>
+        </section>
+
+        <section class="symbols-workspace">
+          <section class="symbols-section symbols-results-section">
+            <div class="symbols-section-head">
+              <h2>Resultados</h2>
+              <span id="symbol-results-count" class="symbols-count">0</span>
+            </div>
+            <div id="symbol-results-list" class="symbol-results-list"></div>
+            <p id="symbols-empty" class="empty-state" hidden></p>
+          </section>
+
+          <section class="symbols-section symbols-chart-section">
+            <div class="symbols-section-head">
+              <div class="symbols-chart-title">
+                <h2 id="active-symbol-title">Gráfico</h2>
+                <span id="active-symbol-meta" class="symbols-chart-meta">Sin símbolo seleccionado</span>
+              </div>
+            </div>
+            <div id="tradingview-chart" class="tradingview-chart">
+              <p id="chart-empty" class="empty-state">Seleccioná un símbolo para ver el gráfico.</p>
+            </div>
+          </section>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <script src="./scripts/symbols.js"></script>
+</body>
+</html>

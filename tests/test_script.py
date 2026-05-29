@@ -2,8 +2,10 @@ import base64
 import json
 import os
 import sys
+import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from unittest.mock import patch
 
 TESTS_DIR = os.path.dirname(__file__)
@@ -313,6 +315,231 @@ class ScriptTokenTests(unittest.TestCase):
         self.assertEqual(script.normalize_operation_state("pendiente"), "pendientes")
         self.assertEqual(script.normalize_operation_state("en_proceso"), "pendientes")
         self.assertEqual(script.normalize_operation_state("iniciada"), "pendientes")
+
+
+class ScriptSymbolSearchTests(unittest.TestCase):
+    def test_normalize_symbol_search_market_defaults_and_preserves_documented_casing(self):
+        self.assertEqual(script.normalize_symbol_search_market(""), "bCBA")
+        self.assertEqual(script.normalize_symbol_search_market("nyse"), "nYSE")
+        with self.assertRaises(RuntimeError):
+            script.normalize_symbol_search_market("INVALID")
+
+    def test_get_symbol_search_countries_for_market_prefers_likely_country_then_falls_back(self):
+        self.assertEqual(script.get_symbol_search_countries_for_market("bCBA")[0], "argentina")
+        self.assertEqual(script.get_symbol_search_countries_for_market("nasdaq")[0], "estados_Unidos")
+        self.assertEqual(set(script.get_symbol_search_countries_for_market("bCS")), set(script.SYMBOL_SEARCH_COUNTRIES))
+
+    def test_resolve_symbol_market_supports_numeric_response_codes(self):
+        self.assertEqual(script.resolve_symbol_market("1"), "bCBA")
+        self.assertEqual(script.resolve_symbol_market("2"), "nYSE")
+        self.assertEqual(script.resolve_symbol_market("3"), "nASDAQ")
+        self.assertEqual(script.resolve_symbol_market("4"), "aMEX")
+
+    def test_normalize_symbol_currency_supports_numeric_response_codes(self):
+        self.assertEqual(script.normalize_symbol_currency("1"), "AR$")
+        self.assertEqual(script.normalize_symbol_currency("2"), "USD")
+
+    def test_normalize_symbol_quotes_payload_uses_useful_fields(self):
+        payload = {
+            "titulos": [
+                {
+                    "simbolo": " alua ",
+                    "descripcion": "Aluar",
+                    "mercado": "1",
+                    "ultimoPrecio": 100,
+                    "variacionPorcentual": 1.5,
+                    "moneda": "1",
+                    "puntas": {
+                        "cantidadCompra": 10,
+                        "precioCompra": 99,
+                        "precioVenta": 101,
+                        "cantidadVenta": 12,
+                    },
+                },
+                {"descripcion": "sin simbolo"},
+                "invalid",
+            ]
+        }
+
+        result = script.normalize_symbol_quotes_payload(payload, "argentina", "acciones")
+
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]["simbolo"], "ALUA")
+        self.assertEqual(result[0]["descripcion"], "Aluar")
+        self.assertEqual(result[0]["mercado"], "bCBA")
+        self.assertEqual(result[0]["mercadoCodigo"], "1")
+        self.assertEqual(result[0]["moneda"], "AR$")
+        self.assertEqual(result[0]["instrumento"], "acciones")
+        self.assertEqual(result[0]["puntas"]["precioCompra"], 99)
+
+    def test_filter_symbols_by_market_deduplicates_and_sorts(self):
+        rows = [
+            {"simbolo": "YPFD", "mercado": "bCBA", "plazo": "t0", "moneda": "peso_Argentino", "instrumento": "acciones"},
+            {"simbolo": "ALUA", "mercado": "bCBA", "plazo": "t0", "moneda": "peso_Argentino", "instrumento": "acciones"},
+            {"simbolo": "ALUA", "mercado": "bCBA", "plazo": "t0", "moneda": "peso_Argentino", "instrumento": "acciones"},
+            {"simbolo": "AAPL", "mercado": "nASDAQ", "plazo": "", "moneda": "dolar", "instrumento": "acciones"},
+        ]
+
+        result = script.filter_symbols_by_market(rows, "bcba")
+
+        self.assertEqual([item["simbolo"] for item in result], ["ALUA", "YPFD"])
+
+    def test_normalize_quote_flags_payload_uses_documented_puntas_shape(self):
+        payload = {
+            "simbolo": " alua ",
+            "mercado": "1",
+            "descripcionTitulo": "Aluar",
+            "ultimoPrecio": 100,
+            "moneda": "peso_Argentino",
+            "operableCompra": True,
+            "operableVenta": False,
+            "puntas": [
+                {
+                    "cantidadCompra": 10,
+                    "precioCompra": 99,
+                    "precioVenta": 101,
+                    "cantidadVenta": 12,
+                }
+            ],
+        }
+
+        result = script.normalize_quote_flags_payload(payload, "bCBA", "ALUA")
+
+        self.assertEqual(result["simbolo"], "ALUA")
+        self.assertEqual(result["mercado"], "bCBA")
+        self.assertEqual(result["descripcionTitulo"], "Aluar")
+        self.assertEqual(result["moneda"], "AR$")
+        self.assertTrue(result["operableCompra"])
+        self.assertFalse(result["operableVenta"])
+        self.assertEqual(result["puntas"][0]["precioCompra"], 99)
+
+    @patch("script.requests.get")
+    def test_get_quote_flags_calls_cotizacion_detalle_endpoint(self, mock_get):
+        class Response:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {
+                    "simbolo": "ALUA",
+                    "mercado": "bCBA",
+                    "puntas": [{"precioCompra": 99, "precioVenta": 101}],
+                }
+
+        mock_get.return_value = Response()
+
+        result = script.get_quote_flags("token", "bcba", "alua")
+
+        self.assertEqual(result["simbolo"], "ALUA")
+        self.assertEqual(result["puntas"][0]["precioVenta"], 101)
+        mock_get.assert_called_once()
+        self.assertIn("/api/v2/bCBA/Titulos/ALUA/CotizacionDetalle", mock_get.call_args.args[0])
+        self.assertEqual(mock_get.call_args.kwargs["headers"]["Authorization"], "Bearer token")
+
+    def test_normalize_dashboard_layout_payload_keeps_only_layout_fields(self):
+        result = script.normalize_dashboard_layout_payload(
+            {
+                "items": [
+                    {
+                        "type": "summary",
+                        "x": 12,
+                        "y": 18,
+                        "width": 320,
+                        "height": 180,
+                        "zIndex": 4,
+                        "selectedSymbol": "NVDA",
+                        "operations": [{"simbolo": "NVDA"}],
+                    },
+                    {"type": "unsupported", "x": 1},
+                ]
+            }
+        )
+
+        self.assertEqual(len(result["items"]), 1)
+        self.assertEqual(result["items"][0]["type"], "summary")
+        self.assertEqual(result["items"][0]["x"], 12)
+        self.assertEqual(result["items"][0]["zIndex"], 4)
+        self.assertNotIn("selectedSymbol", result["items"][0])
+        self.assertNotIn("operations", result["items"][0])
+
+    def test_save_and_load_dashboard_layout_uses_layout_file(self):
+        previous_file = script.DASHBOARD_LAYOUTS_FILE
+        with tempfile.TemporaryDirectory() as temp_dir:
+            script.DASHBOARD_LAYOUTS_FILE = Path(temp_dir) / "dashboard-layouts.json"
+            try:
+                script.save_dashboard_layout(
+                    "Mesa",
+                    {
+                        "version": 1,
+                        "items": [
+                            {
+                                "type": "flags",
+                                "x": 20,
+                                "y": 30,
+                                "width": 360,
+                                "height": 250,
+                                "zIndex": 9,
+                            }
+                        ],
+                    },
+                )
+
+                loaded = script.get_dashboard_layout("Mesa")
+            finally:
+                script.DASHBOARD_LAYOUTS_FILE = previous_file
+
+        self.assertEqual(loaded["items"][0]["type"], "flags")
+        self.assertEqual(loaded["items"][0]["width"], 360)
+        self.assertEqual(loaded["items"][0]["zIndex"], 9)
+
+    @patch("script.get_quote_symbols")
+    @patch("script.get_quote_instruments")
+    def test_get_symbols_for_market_discovers_instruments_and_filters_response(
+        self, mock_get_quote_instruments, mock_get_quote_symbols
+    ):
+        mock_get_quote_instruments.return_value = ["acciones"]
+
+        def quote_symbols(_token, country, _instrument):
+            if country == "estados_Unidos":
+                return [
+                    {"simbolo": "AAPL", "mercado": "3", "plazo": "", "moneda": "2", "instrumento": "acciones"},
+                    {"simbolo": "MSFT", "mercado": "nASDAQ", "plazo": "", "moneda": "USD", "instrumento": "acciones"},
+                ]
+            return [
+                {"simbolo": "ALUA", "mercado": "1", "plazo": "t0", "moneda": "1", "instrumento": "acciones"},
+            ]
+
+        mock_get_quote_symbols.side_effect = quote_symbols
+
+        result = script.get_symbols_for_market("token", "nASDAQ")
+
+        self.assertEqual([item["simbolo"] for item in result["simbolos"]], ["AAPL", "MSFT"])
+        self.assertEqual(result["consultas"]["paises"], ["estados_Unidos"])
+        self.assertEqual(result["consultas"]["instrumentos"], 1)
+        self.assertEqual(result["consultas"]["exitosas"], 1)
+
+    @patch("script.get_quote_symbols")
+    @patch("script.get_quote_instruments")
+    def test_get_symbols_for_market_falls_back_to_next_country_when_preferred_has_no_matches(
+        self, mock_get_quote_instruments, mock_get_quote_symbols
+    ):
+        mock_get_quote_instruments.return_value = ["acciones"]
+
+        def quote_symbols(_token, country, _instrument):
+            if country == "estados_Unidos":
+                return [
+                    {"simbolo": "ALUA", "mercado": "bCBA", "plazo": "t0", "moneda": "peso_Argentino", "instrumento": "acciones"},
+                ]
+            return [
+                {"simbolo": "IBM", "mercado": "nYSE", "plazo": "", "moneda": "dolar", "instrumento": "acciones"},
+            ]
+
+        mock_get_quote_symbols.side_effect = quote_symbols
+
+        result = script.get_symbols_for_market("token", "nYSE")
+
+        self.assertEqual([item["simbolo"] for item in result["simbolos"]], ["IBM"])
+        self.assertEqual(result["consultas"]["paises"], ["estados_Unidos", "argentina"])
 
 
 if __name__ == "__main__":
