@@ -57,7 +57,7 @@ DATA_DIR = get_data_dir()
 TOKEN_FILE = DATA_DIR / "token.json"
 CREDENTIALS_FILE = DATA_DIR / "credentials.json"
 DASHBOARD_LAYOUTS_FILE = DATA_DIR / "dashboard-layouts.json"
-DASHBOARD_LAYOUT_OBJECT_TYPES = {"summary", "tradingview", "flags", "portfolioActions"}
+DASHBOARD_LAYOUT_OBJECT_TYPES = {"summary", "tradingview", "flags", "portfolioActions", "buyOrder"}
 SELL_ORDER_TYPES = {"precioLimite", "precioMercado"}
 SELL_ORDER_PLAZOS = {"t0", "t1", "t2"}
 
@@ -192,6 +192,61 @@ def normalize_sell_order_payload(payload, now_local=None):
         "precio": price,
         "plazo": normalize_sell_order_plazo(payload.get("plazo")),
         "validez": validity,
+    }
+
+
+def normalize_buy_order_payload(payload, now_local=None):
+    if not isinstance(payload, dict):
+        raise RuntimeError("La orden de compra debe ser un objeto.")
+
+    raw_market = normalize_symbol_search_text(payload.get("mercado"))
+    if not raw_market:
+        raise RuntimeError("Debes indicar un mercado para comprar.")
+    market = normalize_symbol_search_market(resolve_symbol_market(raw_market))
+    symbol = normalize_symbol_search_text(payload.get("simbolo")).upper()
+    if not symbol:
+        raise RuntimeError("Debes indicar un símbolo para comprar.")
+
+    order_type = normalize_sell_order_type(payload.get("tipoOrden"))
+    if order_type == "precioLimite":
+        price = normalize_positive_number(payload.get("precio"), "precio")
+    else:
+        try:
+            price = float(payload.get("precio") or 0)
+        except (TypeError, ValueError):
+            raise RuntimeError("precio debe ser numérico.")
+        if price < 0:
+            raise RuntimeError("precio no puede ser negativo.")
+
+    raw_quantity = payload.get("cantidad")
+    raw_amount = payload.get("monto")
+    has_quantity = raw_quantity is not None and str(raw_quantity).strip() != ""
+    has_amount = raw_amount is not None and str(raw_amount).strip() != ""
+
+    if has_quantity:
+        quantity = normalize_positive_integer(raw_quantity, "cantidad")
+    elif has_amount:
+        amount_for_quantity = normalize_positive_number(raw_amount, "monto")
+        if price <= 0:
+            raise RuntimeError("precio debe ser mayor a 0 para calcular cantidad.")
+        quantity = int(amount_for_quantity // price)
+        if quantity <= 0:
+            raise RuntimeError("monto no alcanza para comprar una unidad.")
+    else:
+        raise RuntimeError("Debes indicar cantidad o monto para comprar.")
+
+    amount = quantity * price
+    validity = normalize_symbol_search_text(payload.get("validez")) or format_default_order_validity(now_local)
+
+    return {
+        "mercado": market,
+        "simbolo": symbol,
+        "tipoOrden": order_type,
+        "cantidad": quantity,
+        "precio": price,
+        "plazo": normalize_sell_order_plazo(payload.get("plazo")),
+        "validez": validity,
+        "monto": amount,
     }
 
 
@@ -1012,6 +1067,21 @@ def post_sell_order(access_token, order_payload):
         return {"raw": response.text}
 
 
+def post_buy_order(access_token, order_payload):
+    order = normalize_buy_order_payload(order_payload)
+    response = requests.post(
+        f"{BASE_URL}/api/v2/operar/Comprar",
+        headers={"Authorization": f"Bearer {access_token}"},
+        json=order,
+        timeout=REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    try:
+        return response.json()
+    except ValueError:
+        return {"raw": response.text}
+
+
 def delete_operation(access_token, operation_number):
     normalized_number = normalize_operation_number(operation_number)
     response = requests.delete(
@@ -1699,6 +1769,47 @@ def fetch_sell_order(payload):
         )
 
 
+def fetch_buy_order(payload):
+    payload = payload or {}
+    try:
+        order_payload = normalize_buy_order_payload(payload)
+    except RuntimeError as exc:
+        emit({"estado": "error", "mensaje": str(exc)})
+        return
+
+    target_username = normalize_username(payload.get("username"))
+    try:
+        access_token, source = get_access_token(target_username)
+    except Exception as exc:
+        emit(
+            {
+                "estado": "desconectado",
+                "mensaje": f"No se pudo obtener un token válido: {exc}",
+            }
+        )
+        return
+
+    try:
+        response = post_buy_order(access_token, order_payload)
+        emit(
+            {
+                "estado": "ok",
+                "mensaje": "Orden de compra enviada.",
+                "token_source": source,
+                "orden": response,
+            }
+        )
+    except RuntimeError as exc:
+        emit({"estado": "error", "mensaje": str(exc)})
+    except requests.exceptions.RequestException as exc:
+        emit(
+            {
+                "estado": "error",
+                "mensaje": f"Error al enviar orden de compra: {exc}",
+            }
+        )
+
+
 def fetch_cancel_operation(payload):
     payload = payload or {}
     try:
@@ -2026,6 +2137,9 @@ def main():
         return
     if command == "sell-order":
         fetch_sell_order(payload)
+        return
+    if command == "buy-order":
+        fetch_buy_order(payload)
         return
     if command == "cancel-operation":
         fetch_cancel_operation(payload)

@@ -470,6 +470,45 @@ class ScriptSymbolSearchTests(unittest.TestCase):
                 }
             )
 
+    def test_normalize_buy_order_payload_uses_documented_shape(self):
+        result = script.normalize_buy_order_payload(
+            {
+                "mercado": "1",
+                "simbolo": " alua ",
+                "cantidad": 3,
+                "precio": "105",
+            },
+            now_local=datetime(2026, 5, 29, 10, 12, 0),
+        )
+
+        self.assertEqual(
+            result,
+            {
+                "mercado": "bCBA",
+                "simbolo": "ALUA",
+                "tipoOrden": "precioLimite",
+                "cantidad": 3,
+                "precio": 105.0,
+                "plazo": "t2",
+                "validez": "2026-05-29T23:59:59.000Z",
+                "monto": 315.0,
+            },
+        )
+
+    def test_normalize_buy_order_payload_can_derive_quantity_from_amount(self):
+        result = script.normalize_buy_order_payload(
+            {
+                "mercado": "bCBA",
+                "simbolo": "ALUA",
+                "precio": 100,
+                "monto": 350,
+            },
+            now_local=datetime(2026, 5, 29, 10, 12, 0),
+        )
+
+        self.assertEqual(result["cantidad"], 3)
+        self.assertEqual(result["monto"], 300.0)
+
     def test_normalize_operation_number_rejects_non_numeric_values(self):
         self.assertEqual(script.normalize_operation_number("00123"), "00123")
         self.assertEqual(script.normalize_operation_number(123), "123")
@@ -519,6 +558,51 @@ class ScriptSymbolSearchTests(unittest.TestCase):
             },
         )
 
+    @patch("script.requests.post")
+    def test_post_buy_order_calls_operar_comprar_endpoint(self, mock_post):
+        class Response:
+            text = ""
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"numeroOperacion": 456}
+
+        mock_post.return_value = Response()
+
+        result = script.post_buy_order(
+            "token",
+            {
+                "mercado": "bCBA",
+                "simbolo": "ALUA",
+                "tipoOrden": "precioLimite",
+                "cantidad": 4,
+                "precio": 110,
+                "monto": 440,
+                "plazo": "t0",
+                "validez": "2026-05-29T23:59:59.000Z",
+            },
+        )
+
+        self.assertEqual(result["numeroOperacion"], 456)
+        mock_post.assert_called_once()
+        self.assertIn("/api/v2/operar/Comprar", mock_post.call_args.args[0])
+        self.assertEqual(mock_post.call_args.kwargs["headers"]["Authorization"], "Bearer token")
+        self.assertEqual(
+            mock_post.call_args.kwargs["json"],
+            {
+                "mercado": "bCBA",
+                "simbolo": "ALUA",
+                "tipoOrden": "precioLimite",
+                "cantidad": 4,
+                "precio": 110.0,
+                "plazo": "t0",
+                "validez": "2026-05-29T23:59:59.000Z",
+                "monto": 440.0,
+            },
+        )
+
     @patch("script.requests.delete")
     def test_delete_operation_calls_operaciones_endpoint(self, mock_delete):
         class Response:
@@ -555,11 +639,12 @@ class ScriptSymbolSearchTests(unittest.TestCase):
                     },
                     {"type": "unsupported", "x": 1},
                     {"type": "portfolioActions", "x": 2, "y": 3, "width": 520, "height": 220, "selectedStock": "ALUA"},
+                    {"type": "buyOrder", "x": 6, "y": 7, "width": 380, "height": 250, "selectedBuySymbol": "YPFD"},
                 ]
             }
         )
 
-        self.assertEqual(len(result["items"]), 2)
+        self.assertEqual(len(result["items"]), 3)
         self.assertEqual(result["items"][0]["type"], "summary")
         self.assertEqual(result["items"][0]["x"], 12)
         self.assertEqual(result["items"][0]["zIndex"], 4)
@@ -567,6 +652,8 @@ class ScriptSymbolSearchTests(unittest.TestCase):
         self.assertNotIn("operations", result["items"][0])
         self.assertEqual(result["items"][1]["type"], "portfolioActions")
         self.assertNotIn("selectedStock", result["items"][1])
+        self.assertEqual(result["items"][2]["type"], "buyOrder")
+        self.assertNotIn("selectedBuySymbol", result["items"][2])
 
     def test_save_and_load_dashboard_layout_uses_layout_file(self):
         previous_file = script.DASHBOARD_LAYOUTS_FILE

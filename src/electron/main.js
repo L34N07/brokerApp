@@ -399,6 +399,17 @@ ipcMain.handle('broker:sell-order', async (_event, payload) => {
   }
 });
 
+ipcMain.handle('broker:buy-order', async (_event, payload) => {
+  try {
+    return await runPythonCommand('buy-order', payload || {});
+  } catch (error) {
+    return {
+      estado: 'error',
+      mensaje: error.message
+    };
+  }
+});
+
 ipcMain.handle('broker:cancel-operation', async (_event, payload) => {
   try {
     return await runPythonCommand('cancel-operation', payload || {});

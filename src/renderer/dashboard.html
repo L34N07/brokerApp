@@ -12,18 +12,47 @@
   <main class="layout dashboard-layout">
     <section id="dashboard-shell" class="panel dashboard-shell">
       <div class="top-bar dashboard-top-bar">
-        <div class="main-tabs">
-          <button type="button" class="main-tab-btn active">Panel</button>
+        <div id="dashboard-money-info" class="dashboard-money-info" aria-live="polite">
+          <span id="dashboard-money-available" class="dashboard-money-value available">D: --</span>
+          <span id="dashboard-money-committed" class="dashboard-money-value committed">C: --</span>
+          <button id="btn-refresh-dashboard-money" class="dashboard-money-refresh" type="button" aria-label="Actualizar dinero" title="Actualizar dinero">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M21 12a9 9 0 0 1-15.5 6.2"></path>
+              <path d="M3 12A9 9 0 0 1 18.5 5.8"></path>
+              <path d="M18 2v4h4"></path>
+              <path d="M6 22v-4H2"></path>
+            </svg>
+          </button>
         </div>
 
         <div class="top-actions">
           <input id="dashboard-layout-name" class="dashboard-layout-name" type="text" maxlength="80" placeholder="Nombre diseño" aria-label="Nombre del diseño">
-          <button id="btn-save-dashboard-layout" class="dashboard-layout-action" type="button">Guardar Diseño</button>
+          <button id="btn-save-dashboard-layout" class="dashboard-layout-action" type="button" aria-label="Guardar diseño" title="Guardar diseño">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"></path>
+              <path d="M17 21v-8H7v8"></path>
+              <path d="M7 3v5h8"></path>
+            </svg>
+          </button>
           <select id="dashboard-layout-select" class="dashboard-layout-select" aria-label="Diseños guardados">
             <option value="">Diseños guardados</option>
           </select>
-          <button id="btn-load-dashboard-layout" class="dashboard-layout-action" type="button">Cargar Diseño</button>
-          <button id="btn-delete-dashboard-layout" class="dashboard-layout-action danger" type="button">Borrar Diseño</button>
+          <button id="btn-load-dashboard-layout" class="dashboard-layout-action" type="button" aria-label="Cargar diseño" title="Cargar diseño">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3v12"></path>
+              <path d="m7 10 5 5 5-5"></path>
+              <path d="M5 21h14"></path>
+            </svg>
+          </button>
+          <button id="btn-delete-dashboard-layout" class="dashboard-layout-action danger" type="button" aria-label="Borrar diseño" title="Borrar diseño">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M3 6h18"></path>
+              <path d="M8 6V4h8v2"></path>
+              <path d="M19 6l-1 15H6L5 6"></path>
+              <path d="M10 11v6"></path>
+              <path d="M14 11v6"></path>
+            </svg>
+          </button>
           <button id="btn-toggle-dashboard-panel" class="menu-btn" type="button" aria-label="Mostrar objetos" aria-expanded="true" title="Objetos">
             <img src="./assets/dashboard-menu.png" alt="" aria-hidden="true">
           </button>
@@ -59,6 +88,11 @@
             <button type="button" class="dashboard-palette-item" draggable="true" data-dashboard-object-type="portfolioActions">
               <span class="dashboard-palette-title">Acciones de portafolio</span>
               <span class="dashboard-palette-meta">Venta rápida desde portafolio</span>
+            </button>
+
+            <button type="button" class="dashboard-palette-item" draggable="true" data-dashboard-object-type="buyOrder">
+              <span class="dashboard-palette-title">Orden de compra</span>
+              <span class="dashboard-palette-meta">Compra por símbolo</span>
             </button>
           </div>
         </aside>

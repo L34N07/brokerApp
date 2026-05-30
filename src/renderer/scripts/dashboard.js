@@ -8,17 +8,25 @@ const saveLayoutButton = document.getElementById('btn-save-dashboard-layout');
 const loadLayoutButton = document.getElementById('btn-load-dashboard-layout');
 const deleteLayoutButton = document.getElementById('btn-delete-dashboard-layout');
 const layoutSelect = document.getElementById('dashboard-layout-select');
+const moneyAvailableText = document.getElementById('dashboard-money-available');
+const moneyCommittedText = document.getElementById('dashboard-money-committed');
+const moneyRefreshButton = document.getElementById('btn-refresh-dashboard-money');
 const paletteItems = Array.from(document.querySelectorAll('[data-dashboard-object-type]'));
 
 const SUMMARY_REFRESH_INTERVALS = [20, 30, 60, 120, 300];
 const FLAGS_REFRESH_INTERVALS = [10, 20, 30, 60, 120, 300];
 const PORTFOLIO_REFRESH_INTERVALS = [10, 20, 30, 60, 120, 300];
+const BUY_ORDER_REFRESH_INTERVALS = [10, 20, 30, 60, 120, 300];
 const FLAGS_DEPTH_LEVEL_LIMIT = 6;
+const DASHBOARD_SYMBOL_DEFAULT_INSTRUMENT = 'Acciones';
+const DASHBOARD_SYMBOL_LOAD_CONCURRENCY = 2;
+const DASHBOARD_SYMBOL_PICKER_NEW_VALUE = '__dashboard_new_symbol__';
 const TRADINGVIEW_WIDGET_SCRIPT_URL = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
 const DEFAULT_TRADINGVIEW_SYMBOL = 'NASDAQ:AAPL';
 const DASHBOARD_CACHE_TTLS_MS = {
   operations: 3000,
   portfolio: 3000,
+  accountStatus: 5000,
   quoteFlags: 1800,
   priceStep: 5 * 60 * 1000,
   priceStepError: 30000
@@ -52,6 +60,13 @@ const DASHBOARD_OBJECT_TYPES = {
     height: 190,
     minWidth: 520,
     minHeight: 145
+  },
+  buyOrder: {
+    label: 'Orden de compra',
+    width: 380,
+    height: 250,
+    minWidth: 330,
+    minHeight: 210
   }
 };
 
@@ -62,6 +77,7 @@ let dashboardLayerCounter = 1;
 let lastSummaryRefreshInterval = 60;
 let lastFlagsRefreshInterval = 60;
 let lastPortfolioRefreshInterval = 60;
+let lastBuyOrderRefreshInterval = 60;
 let summaryOperations = [];
 let operationsBySymbol = new Map();
 let availableOperationSymbols = [];
@@ -71,14 +87,34 @@ let draggedPaletteType = '';
 let toastNode = null;
 let toastTimeoutId = null;
 let activeConfirmDialog = null;
+let activeSymbolPickerDialog = null;
 let lastDashboardLayoutName = '';
 let autoLoadedLastLayout = false;
 let activeAccountRefreshRequestId = 0;
+let activeMoneyRefreshRequestId = 0;
 
 const dashboardRequestCache = new Map();
 const dashboardInflightRequests = new Map();
 const dashboardCacheVersions = new Map();
 const portfolioPriceStepCache = new Map();
+const dashboardSymbolsState = {
+  status: 'idle',
+  promise: null,
+  symbols: [],
+  markets: [],
+  errors: [],
+  loadedAt: null,
+  requestId: 0,
+  username: ''
+};
+const dashboardMoneyState = {
+  loading: false,
+  error: '',
+  available: '--',
+  committed: '--',
+  title: '',
+  lastUpdatedAt: null
+};
 
 const dashboardPerfEnabled = (() => {
   try {
@@ -220,6 +256,16 @@ function getDashboardOperations(options = {}) {
     };
   }, {
     ttlMs: DASHBOARD_CACHE_TTLS_MS.operations,
+    force: Boolean(options.force)
+  });
+}
+
+function getDashboardAccountStatus(options = {}) {
+  return getCachedDashboardResource('accountStatus:active', async () => ({
+    response: await window.apiBroker.getAccountStatus(),
+    refreshedAt: nowLocal()
+  }), {
+    ttlMs: DASHBOARD_CACHE_TTLS_MS.accountStatus,
     force: Boolean(options.force)
   });
 }
@@ -401,6 +447,9 @@ function getRefreshIntervalsForType(type) {
   if (type === 'portfolioActions') {
     return PORTFOLIO_REFRESH_INTERVALS;
   }
+  if (type === 'buyOrder') {
+    return BUY_ORDER_REFRESH_INTERVALS;
+  }
   return SUMMARY_REFRESH_INTERVALS;
 }
 
@@ -413,6 +462,9 @@ function getDefaultRefreshIntervalForType(type) {
   }
   if (type === 'portfolioActions') {
     return lastPortfolioRefreshInterval;
+  }
+  if (type === 'buyOrder') {
+    return lastBuyOrderRefreshInterval;
   }
   return null;
 }
@@ -443,6 +495,559 @@ function setStatus(message, tone = 'neutral', options = {}) {
   toastTimeoutId = setTimeout(() => {
     node.classList.remove('show');
   }, 2200);
+}
+
+function getDashboardSymbolKey(symbol) {
+  return [
+    safeText(symbol?.mercado, '').toLowerCase(),
+    safeText(symbol?.simbolo, '').toUpperCase(),
+    safeText(symbol?.plazo, '').toLowerCase(),
+    safeText(symbol?.moneda, '').toLowerCase(),
+    safeText(symbol?.instrumento, '').toLowerCase()
+  ].join('::');
+}
+
+function getDashboardSymbolDescription(symbol) {
+  return safeText(symbol?.descripcion, safeText(symbol?.tipo, safeText(symbol?.instrumento, '')));
+}
+
+function buildDashboardSymbolSearchText(symbol) {
+  return [
+    symbol?.simbolo,
+    symbol?.descripcion,
+    symbol?.mercado,
+    symbol?.pais,
+    symbol?.instrumento,
+    symbol?.tipo,
+    symbol?.moneda,
+    symbol?.plazo
+  ].map((value) => safeText(value, '').toLowerCase()).join(' ');
+}
+
+function normalizeDashboardSymbol(symbol) {
+  if (!symbol || typeof symbol !== 'object') {
+    return null;
+  }
+
+  const symbolCode = safeText(symbol.simbolo, '').toUpperCase();
+  const market = safeText(symbol.mercado, '');
+  if (!symbolCode || !market) {
+    return null;
+  }
+
+  return {
+    ...symbol,
+    simbolo: symbolCode,
+    mercado: market,
+    descripcion: getDashboardSymbolDescription(symbol),
+    moneda: safeText(symbol.moneda, ''),
+    plazo: safeText(symbol.plazo, ''),
+    instrumento: safeText(symbol.instrumento, DASHBOARD_SYMBOL_DEFAULT_INSTRUMENT),
+  };
+}
+
+function mergeDashboardSymbols(symbols) {
+  const merged = new Map();
+  for (const rawSymbol of symbols || []) {
+    const symbol = normalizeDashboardSymbol(rawSymbol);
+    if (!symbol) {
+      continue;
+    }
+    const key = buildStockOptionKey(symbol.simbolo, symbol.mercado);
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, symbol);
+      continue;
+    }
+    if (!parseOptionalNumber(existing.ultimoPrecio) && parseOptionalNumber(symbol.ultimoPrecio)) {
+      merged.set(key, symbol);
+    }
+  }
+
+  return Array.from(merged.values()).sort((left, right) => {
+    const marketCompare = safeText(left.mercado, '').localeCompare(safeText(right.mercado, ''));
+    if (marketCompare !== 0) {
+      return marketCompare;
+    }
+    return safeText(left.simbolo, '').localeCompare(safeText(right.simbolo, ''));
+  });
+}
+
+function normalizeDashboardMarkets(config) {
+  const rawMarkets = Array.isArray(config?.mercados) ? config.mercados : [];
+  return rawMarkets
+    .map((market) => {
+      if (typeof market === 'string') {
+        return { codigo: market, nombre: market };
+      }
+      const code = safeText(market?.codigo, '');
+      if (!code) {
+        return null;
+      }
+      return {
+        codigo: code,
+        nombre: safeText(market?.nombre, code)
+      };
+    })
+    .filter(Boolean);
+}
+
+function notifyActiveSymbolPicker() {
+  if (activeSymbolPickerDialog && typeof activeSymbolPickerDialog.render === 'function') {
+    activeSymbolPickerDialog.render();
+  }
+}
+
+function resetDashboardSymbolState() {
+  dashboardSymbolsState.requestId += 1;
+  dashboardSymbolsState.status = 'idle';
+  dashboardSymbolsState.promise = null;
+  dashboardSymbolsState.symbols = [];
+  dashboardSymbolsState.markets = [];
+  dashboardSymbolsState.errors = [];
+  dashboardSymbolsState.loadedAt = null;
+  dashboardSymbolsState.username = '';
+  notifyActiveSymbolPicker();
+}
+
+async function loadDashboardSymbolList(options = {}) {
+  if (!activeUsername) {
+    resetDashboardSymbolState();
+    return dashboardSymbolsState;
+  }
+
+  const force = Boolean(options.force);
+  if (!force && dashboardSymbolsState.status === 'ready' && dashboardSymbolsState.username === activeUsername) {
+    return dashboardSymbolsState;
+  }
+  if (!force && dashboardSymbolsState.promise && dashboardSymbolsState.username === activeUsername) {
+    return dashboardSymbolsState.promise;
+  }
+
+  const requestId = dashboardSymbolsState.requestId + 1;
+  const username = activeUsername;
+  dashboardSymbolsState.requestId = requestId;
+  dashboardSymbolsState.status = 'loading';
+  dashboardSymbolsState.errors = [];
+  dashboardSymbolsState.username = username;
+  notifyActiveSymbolPicker();
+
+  const promise = (async () => {
+    try {
+      const config = await window.apiBroker.getSymbolSearchConfig();
+      if (requestId !== dashboardSymbolsState.requestId || username !== activeUsername) {
+        return dashboardSymbolsState;
+      }
+      if (config?.estado !== 'ok' || !Array.isArray(config.mercados)) {
+        throw new Error(config?.mensaje || 'No se pudo cargar la configuración de símbolos.');
+      }
+
+      const markets = normalizeDashboardMarkets(config);
+      dashboardSymbolsState.markets = markets;
+      notifyActiveSymbolPicker();
+
+      const batches = await runWithConcurrency(markets, DASHBOARD_SYMBOL_LOAD_CONCURRENCY, async (market) => {
+        try {
+          const response = await window.apiBroker.getSymbols({
+            mercado: market.codigo,
+            instrumento: DASHBOARD_SYMBOL_DEFAULT_INSTRUMENT
+          });
+          if (response?.estado !== 'ok' || !Array.isArray(response.simbolos)) {
+            throw new Error(response?.mensaje || 'Respuesta inesperada.');
+          }
+          return {
+            symbols: response.simbolos,
+            errors: Array.isArray(response.errores)
+              ? response.errores.map((error) => `${market.codigo}: ${error}`)
+              : []
+          };
+        } catch (error) {
+          return {
+            symbols: [],
+            errors: [`${market.codigo}: ${error.message || 'No se pudieron cargar símbolos.'}`]
+          };
+        }
+      });
+
+      if (requestId !== dashboardSymbolsState.requestId || username !== activeUsername) {
+        return dashboardSymbolsState;
+      }
+
+      const symbols = mergeDashboardSymbols(batches.flatMap((batch) => batch.symbols));
+      const errors = batches.flatMap((batch) => batch.errors);
+      dashboardSymbolsState.symbols = symbols;
+      dashboardSymbolsState.errors = errors;
+      dashboardSymbolsState.loadedAt = nowLocal();
+      dashboardSymbolsState.status = symbols.length > 0 ? 'ready' : 'error';
+      if (symbols.length === 0 && errors.length === 0) {
+        dashboardSymbolsState.errors = ['No hay símbolos disponibles.'];
+      }
+      return dashboardSymbolsState;
+    } catch (error) {
+      if (requestId === dashboardSymbolsState.requestId && username === activeUsername) {
+        dashboardSymbolsState.status = 'error';
+        dashboardSymbolsState.errors = [error.message || 'No se pudieron cargar símbolos.'];
+      }
+      return dashboardSymbolsState;
+    } finally {
+      if (dashboardSymbolsState.promise === promise) {
+        dashboardSymbolsState.promise = null;
+      }
+      notifyActiveSymbolPicker();
+    }
+  })();
+
+  dashboardSymbolsState.promise = promise;
+  return promise;
+}
+
+function beginDashboardSymbolLoading(options = {}) {
+  loadDashboardSymbolList(options).catch(() => {});
+}
+
+function buildStockOptionFromDashboardSymbol(symbol) {
+  const normalized = normalizeDashboardSymbol(symbol);
+  if (!normalized) {
+    return null;
+  }
+  const description = getDashboardSymbolDescription(normalized);
+  return {
+    key: buildStockOptionKey(normalized.simbolo, normalized.mercado),
+    symbol: normalized.simbolo,
+    market: normalized.mercado,
+    label: description || normalized.simbolo,
+    description,
+    currency: safeText(normalized.moneda, ''),
+    lastPrice: parseOptionalNumber(normalized.ultimoPrecio),
+    plazo: normalizeSellOrderPlazo(normalized.plazo),
+    source: 'symbols',
+    sourceLabel: '',
+  };
+}
+
+function getFilteredDashboardSymbols(pickerState) {
+  const market = safeText(pickerState.market, '');
+  const query = safeText(pickerState.query, '').toLowerCase();
+  return dashboardSymbolsState.symbols.filter((symbol) => {
+    if (market && safeText(symbol.mercado, '') !== market) {
+      return false;
+    }
+    if (!query) {
+      return true;
+    }
+    return buildDashboardSymbolSearchText(symbol).includes(query);
+  });
+}
+
+function closeActiveSymbolPicker(result = null) {
+  if (!activeSymbolPickerDialog) {
+    return;
+  }
+
+  const { overlay, resolve, previousFocus } = activeSymbolPickerDialog;
+  activeSymbolPickerDialog = null;
+  overlay.remove();
+  if (previousFocus && typeof previousFocus.focus === 'function') {
+    previousFocus.focus();
+  }
+  resolve(result);
+}
+
+function createDashboardSymbolPickerRow(symbol, selectedKey) {
+  const stockKey = buildStockOptionKey(symbol.simbolo, symbol.mercado);
+  const isSelected = stockKey === selectedKey;
+  const row = document.createElement('button');
+  row.type = 'button';
+  row.className = `dashboard-symbol-row ${isSelected ? 'active' : ''}`.trim();
+  row.setAttribute('aria-pressed', String(isSelected));
+  row.addEventListener('click', () => {
+    closeActiveSymbolPicker(symbol);
+  });
+
+  const main = document.createElement('span');
+  main.className = 'dashboard-symbol-row-main';
+
+  const code = document.createElement('strong');
+  code.textContent = safeText(symbol.simbolo);
+  main.appendChild(code);
+
+  const description = document.createElement('span');
+  description.textContent = getDashboardSymbolDescription(symbol) || safeText(symbol.instrumento, '');
+  main.appendChild(description);
+
+  const meta = document.createElement('span');
+  meta.className = 'dashboard-symbol-row-meta';
+  meta.textContent = [
+    safeText(symbol.mercado, ''),
+    safeText(symbol.moneda, ''),
+    formatOptionalNumber(symbol.ultimoPrecio)
+  ].filter(Boolean).join(' · ');
+
+  row.appendChild(main);
+  row.appendChild(meta);
+  return row;
+}
+
+function showDashboardSymbolPicker({ title = 'Seleccionar símbolo', selectedKey = '' } = {}) {
+  if (activeSymbolPickerDialog) {
+    closeActiveSymbolPicker(null);
+  }
+
+  return new Promise((resolve) => {
+    const previousFocus = document.activeElement;
+    const pickerState = {
+      market: '',
+      query: ''
+    };
+
+    const overlay = document.createElement('div');
+    overlay.className = 'dashboard-confirm-overlay dashboard-symbol-overlay';
+    overlay.setAttribute('role', 'presentation');
+
+    const dialog = document.createElement('section');
+    dialog.className = 'dashboard-confirm-dialog dashboard-symbol-dialog';
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('aria-modal', 'true');
+    dialog.setAttribute('aria-labelledby', 'dashboard-symbol-title');
+    dialog.tabIndex = -1;
+
+    const heading = document.createElement('h2');
+    heading.id = 'dashboard-symbol-title';
+    heading.textContent = title;
+
+    const controls = document.createElement('div');
+    controls.className = 'dashboard-symbol-controls';
+
+    const marketSelect = document.createElement('select');
+    marketSelect.setAttribute('aria-label', 'Mercado');
+
+    const searchInput = document.createElement('input');
+    searchInput.type = 'search';
+    searchInput.placeholder = 'Buscar';
+    searchInput.setAttribute('aria-label', 'Buscar símbolo');
+
+    controls.appendChild(marketSelect);
+    controls.appendChild(searchInput);
+
+    const meta = document.createElement('div');
+    meta.className = 'dashboard-symbol-meta';
+
+    const list = document.createElement('div');
+    list.className = 'dashboard-symbol-list';
+
+    const actions = document.createElement('div');
+    actions.className = 'dashboard-confirm-actions';
+
+    const cancelButton = document.createElement('button');
+    cancelButton.type = 'button';
+    cancelButton.className = 'dashboard-confirm-btn secondary';
+    cancelButton.textContent = 'Cancelar';
+    cancelButton.addEventListener('click', () => {
+      closeActiveSymbolPicker(null);
+    });
+    actions.appendChild(cancelButton);
+
+    dialog.appendChild(heading);
+    dialog.appendChild(controls);
+    dialog.appendChild(meta);
+    dialog.appendChild(list);
+    dialog.appendChild(actions);
+    overlay.appendChild(dialog);
+
+    const render = () => {
+      const previousMarket = pickerState.market;
+      clearNode(marketSelect);
+      marketSelect.appendChild(createSelectOption('', 'Todos'));
+      for (const market of dashboardSymbolsState.markets) {
+        marketSelect.appendChild(createSelectOption(market.codigo, market.nombre || market.codigo));
+      }
+      const marketStillAvailable = !previousMarket || dashboardSymbolsState.markets.some(
+        (market) => market.codigo === previousMarket
+      );
+      pickerState.market = marketStillAvailable ? previousMarket : '';
+      marketSelect.value = pickerState.market;
+
+      clearNode(list);
+      const isLoading = dashboardSymbolsState.status === 'loading';
+      const filtered = getFilteredDashboardSymbols(pickerState);
+      const shown = filtered.slice(0, 160);
+      const errors = dashboardSymbolsState.errors || [];
+
+      marketSelect.disabled = isLoading && dashboardSymbolsState.markets.length === 0;
+      searchInput.disabled = isLoading && dashboardSymbolsState.symbols.length === 0;
+
+      if (isLoading && dashboardSymbolsState.symbols.length === 0) {
+        meta.textContent = 'Cargando símbolos...';
+        list.appendChild(createStateNode('Cargando símbolos...'));
+        return;
+      }
+
+      if (dashboardSymbolsState.status === 'error' && dashboardSymbolsState.symbols.length === 0) {
+        meta.textContent = 'Error';
+        list.appendChild(createStateNode(errors[0] || 'No se pudieron cargar símbolos.', 'error'));
+        return;
+      }
+
+      meta.textContent = filtered.length === dashboardSymbolsState.symbols.length
+        ? `${filtered.length} símbolos`
+        : `${filtered.length}/${dashboardSymbolsState.symbols.length} símbolos`;
+
+      if (isLoading) {
+        list.appendChild(createUpdatingIndicator('Cargando símbolos'));
+      }
+      if (errors.length > 0 && dashboardSymbolsState.symbols.length > 0) {
+        const note = document.createElement('p');
+        note.className = 'dashboard-symbol-note';
+        note.textContent = errors[0];
+        list.appendChild(note);
+      }
+      if (filtered.length === 0) {
+        list.appendChild(createStateNode('Sin resultados.'));
+        return;
+      }
+
+      for (const symbol of shown) {
+        list.appendChild(createDashboardSymbolPickerRow(symbol, selectedKey));
+      }
+      if (shown.length < filtered.length) {
+        const note = document.createElement('p');
+        note.className = 'dashboard-symbol-note';
+        note.textContent = `Mostrando ${shown.length} de ${filtered.length}.`;
+        list.appendChild(note);
+      }
+    };
+
+    marketSelect.addEventListener('change', () => {
+      pickerState.market = marketSelect.value;
+      render();
+    });
+    searchInput.addEventListener('input', () => {
+      pickerState.query = searchInput.value;
+      render();
+    });
+    overlay.addEventListener('mousedown', (event) => {
+      if (event.target === overlay) {
+        closeActiveSymbolPicker(null);
+      }
+    });
+    overlay.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeActiveSymbolPicker(null);
+      }
+    });
+
+    activeSymbolPickerDialog = { overlay, resolve, previousFocus, render };
+    document.body.appendChild(overlay);
+    render();
+    beginDashboardSymbolLoading();
+    requestAnimationFrame(() => {
+      searchInput.focus();
+    });
+  });
+}
+
+function resolveDashboardCurrencyCode(cuenta) {
+  const symbol = safeText(cuenta?.simboloMoneda, '').trim();
+  if (symbol === 'AR$' || symbol === 'USD') {
+    return symbol;
+  }
+
+  const raw = safeText(cuenta?.moneda, '').toLowerCase();
+  if (raw.includes('peso')) {
+    return 'AR$';
+  }
+  if (raw.includes('dolar') || raw.includes('dólar')) {
+    return 'USD';
+  }
+  return '';
+}
+
+function formatDashboardMoneyParts(cuentas, key) {
+  const parts = [];
+  for (const cuenta of cuentas) {
+    const value = parseOperationNumber(cuenta?.[key]);
+    const currency = resolveDashboardCurrencyCode(cuenta);
+    parts.push(`${currency ? `${currency} ` : ''}${formatNumber(value)}`);
+  }
+  return parts.length ? parts.join(' / ') : '--';
+}
+
+function renderDashboardMoney() {
+  if (moneyAvailableText) {
+    moneyAvailableText.textContent = `D: ${dashboardMoneyState.available}`;
+    moneyAvailableText.title = dashboardMoneyState.title || '';
+  }
+  if (moneyCommittedText) {
+    moneyCommittedText.textContent = `C: ${dashboardMoneyState.committed}`;
+    moneyCommittedText.title = dashboardMoneyState.title || '';
+  }
+  if (moneyRefreshButton) {
+    moneyRefreshButton.disabled = !activeUsername || dashboardMoneyState.loading;
+    moneyRefreshButton.classList.toggle('loading', dashboardMoneyState.loading);
+    moneyRefreshButton.title = dashboardMoneyState.error
+      ? dashboardMoneyState.error
+      : dashboardMoneyState.lastUpdatedAt
+        ? `Actualizar dinero · ${formatRefreshClock(dashboardMoneyState.lastUpdatedAt)}`
+        : 'Actualizar dinero';
+  }
+}
+
+function clearDashboardMoney() {
+  activeMoneyRefreshRequestId += 1;
+  dashboardMoneyState.loading = false;
+  dashboardMoneyState.error = '';
+  dashboardMoneyState.available = '--';
+  dashboardMoneyState.committed = '--';
+  dashboardMoneyState.title = '';
+  dashboardMoneyState.lastUpdatedAt = null;
+  renderDashboardMoney();
+}
+
+async function refreshDashboardMoney(options = {}) {
+  if (!activeUsername || dashboardMoneyState.loading) {
+    renderDashboardMoney();
+    return;
+  }
+
+  const requestId = activeMoneyRefreshRequestId + 1;
+  activeMoneyRefreshRequestId = requestId;
+  dashboardMoneyState.loading = true;
+  dashboardMoneyState.error = '';
+  renderDashboardMoney();
+
+  try {
+    const accountData = await getDashboardAccountStatus({ force: Boolean(options.force) });
+    if (requestId !== activeMoneyRefreshRequestId) {
+      return;
+    }
+    const response = accountData.response;
+    if (!Array.isArray(response?.cuentas)) {
+      throw new Error(response?.mensaje || 'No se pudo cargar el dinero de la cuenta.');
+    }
+
+    dashboardMoneyState.available = formatDashboardMoneyParts(response.cuentas, 'disponible');
+    dashboardMoneyState.committed = formatDashboardMoneyParts(response.cuentas, 'comprometido');
+    dashboardMoneyState.title = `Actualizado ${formatRefreshClock(accountData.refreshedAt)}`;
+    dashboardMoneyState.lastUpdatedAt = accountData.refreshedAt;
+    dashboardMoneyState.error = '';
+    if (!options.silent) {
+      setStatus('Dinero actualizado.', 'ok');
+    }
+  } catch (error) {
+    if (requestId !== activeMoneyRefreshRequestId) {
+      return;
+    }
+    dashboardMoneyState.error = error.message || 'No se pudo cargar el dinero de la cuenta.';
+    if (!options.silent) {
+      setStatus(dashboardMoneyState.error, 'error');
+    }
+  } finally {
+    if (requestId === activeMoneyRefreshRequestId) {
+      dashboardMoneyState.loading = false;
+      renderDashboardMoney();
+    }
+  }
 }
 
 function closeActiveConfirmDialog(result = false) {
@@ -619,6 +1224,18 @@ function addStockOption(optionMap, candidate) {
     if (!existing.market && market) {
       existing.market = market;
     }
+    if (!existing.description && candidate.description) {
+      existing.description = candidate.description;
+    }
+    if (!existing.currency && candidate.currency) {
+      existing.currency = candidate.currency;
+    }
+    if (!existing.lastPrice && candidate.lastPrice) {
+      existing.lastPrice = candidate.lastPrice;
+    }
+    if (!existing.plazo && candidate.plazo) {
+      existing.plazo = candidate.plazo;
+    }
     return;
   }
 
@@ -627,6 +1244,10 @@ function addStockOption(optionMap, candidate) {
     symbol,
     market,
     label: candidate.label || symbol,
+    description: candidate.description || '',
+    currency: candidate.currency || '',
+    lastPrice: parseOptionalNumber(candidate.lastPrice),
+    plazo: normalizeSellOrderPlazo(candidate.plazo),
     sources: [candidate.source],
     sourceLabels: [candidate.sourceLabel],
   });
@@ -677,6 +1298,10 @@ function mergeStockOptions(optionGroups) {
         symbol: option.symbol,
         market: option.market,
         label: option.label,
+        description: option.description,
+        currency: option.currency,
+        lastPrice: option.lastPrice,
+        plazo: option.plazo,
         source: option.sources[0],
         sourceLabel: option.sourceLabels[0],
       });
@@ -873,6 +1498,10 @@ function normalizePriceToStep(value, step) {
 
 function canSubmitSellOrder() {
   return Boolean(window.apiBroker && typeof window.apiBroker.sellOrder === 'function');
+}
+
+function canSubmitBuyOrder() {
+  return Boolean(window.apiBroker && typeof window.apiBroker.buyOrder === 'function');
 }
 
 function canCancelOperation() {
@@ -1377,6 +2006,8 @@ async function handlePendingOperationCancel(item, operation) {
     }
 
     invalidateDashboardCache('operations');
+    invalidateDashboardCache('accountStatus');
+    refreshDashboardMoney({ force: true, silent: true });
     cancelDashboardRequestsByType('summary');
     const updatedOperations = removeOperationByNumber(summaryOperations, operationNumber);
     applySharedOperationsData(updatedOperations, lastOperationsRefreshAt || nowLocal(), {
@@ -1525,7 +2156,7 @@ function ensureDashboardObjectElement(item) {
 }
 
 function isRefreshableItem(item) {
-  return item.type === 'summary' || item.type === 'flags' || item.type === 'portfolioActions';
+  return item.type === 'summary' || item.type === 'flags' || item.type === 'portfolioActions' || item.type === 'buyOrder';
 }
 
 function itemHasRefreshTarget(item) {
@@ -1537,6 +2168,9 @@ function itemHasRefreshTarget(item) {
   }
   if (item.type === 'portfolioActions') {
     return true;
+  }
+  if (item.type === 'buyOrder') {
+    return Boolean(item.selectedBuySymbol && item.selectedBuySymbol.market);
   }
   return false;
 }
@@ -1567,12 +2201,22 @@ function createHeaderTitleControl(item, fallbackText) {
     select.className = 'dashboard-header-select';
     select.setAttribute('aria-label', 'Seleccionar acción');
     select.appendChild(createSelectOption('', item.sourcesLoading ? 'Cargando...' : 'Acción'));
-    for (const option of item.stockOptions || []) {
+    const options = Array.isArray(item.stockOptions) ? item.stockOptions : [];
+    if (item.selectedStock && !options.some((option) => option.key === item.selectedStockKey)) {
+      options.push(item.selectedStock);
+    }
+    for (const option of options) {
       select.appendChild(createSelectOption(option.key, option.symbol));
     }
+    select.appendChild(createSelectOption(DASHBOARD_SYMBOL_PICKER_NEW_VALUE, 'Nuevo'));
     select.value = item.selectedStockKey || '';
-    select.disabled = !activeUsername || item.sourcesLoading || item.loading || item.stockOptions.length === 0;
+    select.disabled = !activeUsername || item.sourcesLoading || item.loading;
     select.addEventListener('change', () => {
+      if (select.value === DASHBOARD_SYMBOL_PICKER_NEW_VALUE) {
+        select.value = item.selectedStockKey || '';
+        openFlagsSymbolPicker(item.id);
+        return;
+      }
       handleFlagsStockChange(item.id, select.value);
     });
     return select;
@@ -1603,9 +2247,14 @@ function handleRefreshToggle(itemId) {
     if (item.selectedStock) {
       loadFlagsForItem(item.id, { source: 'manual', force: true });
     }
-  } else {
+  } else if (item.type === 'portfolioActions') {
     configurePortfolioActionsTimer(item);
     loadPortfolioActionsItem(item.id, { source: 'manual', force: true });
+  } else if (item.type === 'buyOrder') {
+    configureBuyOrderTimer(item);
+    if (item.selectedBuySymbol) {
+      loadBuyOrderQuote(item.id, { source: 'manual', force: true });
+    }
   }
 
   renderDashboardItem(item);
@@ -2033,26 +2682,42 @@ function handleFlagsPriceClick(flagsItem, price) {
     applied = true;
   }
 
+  for (const item of dashboardItems) {
+    if (item.type !== 'buyOrder' || !item.selectedBuySymbol) {
+      continue;
+    }
+    const sameSymbol = item.selectedBuySymbol.symbol === stock.symbol;
+    const sameMarket = !stock.market || !item.selectedBuySymbol.market || item.selectedBuySymbol.market === stock.market;
+    if (!sameSymbol || !sameMarket) {
+      continue;
+    }
+
+    const control = getBuyOrderControl(item);
+    const normalizedPrice = normalizePriceToStep(numericPrice, item.buyPriceStep);
+    control.priceText = formatPriceForInput(normalizedPrice ?? numericPrice, item.buyPriceStep);
+    control.priceTouched = true;
+    control.error = '';
+    syncBuyOrderControl(item, 'price');
+    renderDashboardItem(item);
+    applied = true;
+  }
+
   if (applied) {
     setStatus(`Precio aplicado: ${stock.symbol}.`, 'ok');
   }
 }
 
 function renderFlagsContent(container, item) {
-  if (item.sourcesLoading) {
+  if (item.sourcesLoading && !item.selectedStock) {
     container.appendChild(createStateNode('Cargando portafolio y operaciones...'));
     return;
   }
-  if (item.sourcesError) {
+  if (item.sourcesError && !item.selectedStock) {
     container.appendChild(createStateNode(item.sourcesError, 'error'));
     return;
   }
-  if (!item.stockOptions.length) {
-    container.appendChild(createStateNode('No hay acciones disponibles desde portafolio u operaciones recientes.'));
-    return;
-  }
   if (!item.selectedStock) {
-    container.appendChild(createStateNode('Seleccioná una acción del portafolio u operaciones recientes.'));
+    container.appendChild(createStateNode('Seleccioná una acción.'));
     return;
   }
   if (!item.selectedStock.market) {
@@ -2087,6 +2752,12 @@ function renderFlagsContent(container, item) {
   chart.appendChild(createFlagsDepthSide(item, 'Venta', sellLevels, 'sell'));
   container.appendChild(chart);
 
+  if (item.sourcesLoading) {
+    container.appendChild(createUpdatingIndicator('Actualizando acciones'));
+  }
+  if (item.sourcesError) {
+    container.appendChild(createStateNode(item.sourcesError, 'error'));
+  }
   if (item.error) {
     container.appendChild(createStateNode(item.error, 'error'));
   }
@@ -2249,6 +2920,8 @@ async function handlePortfolioSellClick(item, row) {
     setStatus(`Orden de venta enviada: ${row.symbol} x${quantity}.`, 'ok');
     invalidateDashboardCache('portfolio');
     invalidateDashboardCache('operations');
+    invalidateDashboardCache('accountStatus');
+    refreshDashboardMoney({ force: true, silent: true });
     cancelDashboardRequestsByType('portfolioActions');
     cancelDashboardRequestsByType('summary');
     loadPortfolioActionsItem(item.id, { source: 'manual', force: true });
@@ -2393,6 +3066,456 @@ function renderPortfolioActionsObject(item, root) {
   root.appendChild(body);
 }
 
+function getBuyOrderControl(item) {
+  if (!item.buyOrderControl) {
+    item.buyOrderControl = {
+      priceText: '',
+      quantityText: '',
+      amountText: '',
+      lastEdited: 'quantity',
+      priceTouched: false,
+      submitting: false,
+      error: '',
+    };
+  }
+  return item.buyOrderControl;
+}
+
+function formatAmountForInput(value) {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? formatPriceForInput(number) : '';
+}
+
+function calculateBuyQuantityFromAmount(amount, price) {
+  if (!Number.isFinite(amount) || amount <= 0 || !Number.isFinite(price) || price <= 0) {
+    return 0;
+  }
+  return Math.floor(amount / price);
+}
+
+function syncBuyOrderControl(item, source = '') {
+  const control = getBuyOrderControl(item);
+  if (source === 'quantity') {
+    control.lastEdited = 'quantity';
+  } else if (source === 'amount') {
+    control.lastEdited = 'amount';
+  }
+
+  const price = parsePriceNumber(control.priceText);
+  if (!price || price <= 0) {
+    return;
+  }
+
+  if (control.lastEdited === 'amount') {
+    const amount = parseOperationNumber(control.amountText);
+    const quantity = calculateBuyQuantityFromAmount(amount, price);
+    control.quantityText = quantity > 0 ? String(quantity) : '';
+    return;
+  }
+
+  const quantity = Math.max(Math.round(parseOperationNumber(control.quantityText)), 0);
+  control.amountText = quantity > 0 ? formatAmountForInput(quantity * price) : '';
+}
+
+function applyBuyOrderLastPrice(item, lastPrice, step = item.buyPriceStep) {
+  const control = getBuyOrderControl(item);
+  if (!Number.isFinite(lastPrice) || lastPrice <= 0 || control.priceTouched) {
+    return;
+  }
+
+  const normalizedPrice = normalizePriceToStep(lastPrice, step) ?? lastPrice;
+  control.priceText = formatPriceForInput(normalizedPrice, step);
+  syncBuyOrderControl(item, 'price');
+}
+
+function getBuyOrderPlazo(item) {
+  return normalizeSellOrderPlazo(item.selectedBuySymbol?.plazo);
+}
+
+function setBuyOrderSymbol(item, option) {
+  if (!item || item.type !== 'buyOrder' || !option) {
+    return;
+  }
+
+  const control = getBuyOrderControl(item);
+  item.selectedBuySymbolKey = option.key;
+  item.selectedBuySymbol = option;
+  item.buyQuote = null;
+  item.buyLastPrice = parseOptionalNumber(option.lastPrice);
+  item.buyPriceStep = null;
+  item.buyPriceStepError = '';
+  item.error = '';
+  item.lastUpdatedAt = null;
+  control.error = '';
+  control.submitting = false;
+  control.priceTouched = false;
+  control.priceText = '';
+  control.quantityText = '';
+  control.amountText = '';
+
+  if (item.buyLastPrice) {
+    applyBuyOrderLastPrice(item, item.buyLastPrice);
+  } else {
+    syncBuyOrderControl(item, 'price');
+  }
+
+  configureBuyOrderTimer(item);
+  renderDashboardItem(item);
+  loadBuyOrderQuote(item.id, { source: 'manual' });
+}
+
+async function openBuyOrderSymbolPicker(itemId) {
+  const item = getItemById(itemId);
+  if (!item || item.type !== 'buyOrder') {
+    return;
+  }
+
+  const selectedSymbol = await showDashboardSymbolPicker({
+    title: 'Símbolo de compra',
+    selectedKey: item.selectedBuySymbolKey || ''
+  });
+  if (!selectedSymbol) {
+    renderDashboardItem(item);
+    return;
+  }
+
+  const option = buildStockOptionFromDashboardSymbol(selectedSymbol);
+  const latestItem = getItemById(itemId);
+  if (!option || !latestItem || latestItem.type !== 'buyOrder') {
+    return;
+  }
+
+  setBuyOrderSymbol(latestItem, option);
+}
+
+function createBuyOrderSymbolButton(item) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'buy-order-symbol-btn';
+  button.disabled = !activeUsername || getBuyOrderControl(item).submitting;
+  button.addEventListener('click', () => {
+    openBuyOrderSymbolPicker(item.id);
+  });
+
+  const symbol = document.createElement('strong');
+  symbol.textContent = item.selectedBuySymbol?.symbol || 'Símbolo';
+  button.appendChild(symbol);
+
+  const meta = document.createElement('span');
+  meta.textContent = item.selectedBuySymbol
+    ? [item.selectedBuySymbol.market, item.selectedBuySymbol.currency].filter(Boolean).join(' · ')
+    : 'Nuevo';
+  button.appendChild(meta);
+
+  return button;
+}
+
+function createBuyOrderInput(labelText, input) {
+  const label = document.createElement('label');
+  label.className = 'buy-order-field';
+
+  const labelSpan = document.createElement('span');
+  labelSpan.textContent = labelText;
+
+  label.appendChild(labelSpan);
+  label.appendChild(input);
+  return label;
+}
+
+function commitBuyOrderPrice(item, input) {
+  const control = getBuyOrderControl(item);
+  const normalized = normalizePriceToStep(input.value, item.buyPriceStep);
+  control.priceTouched = true;
+  control.priceText = normalized === null ? '' : formatPriceForInput(normalized, item.buyPriceStep);
+  control.error = '';
+  syncBuyOrderControl(item, 'price');
+  renderDashboardItem(item);
+}
+
+function commitBuyOrderQuantity(item, input) {
+  const control = getBuyOrderControl(item);
+  const quantity = Math.max(Math.round(parseOperationNumber(input.value)), 0);
+  control.quantityText = quantity > 0 ? String(quantity) : '';
+  control.error = '';
+  syncBuyOrderControl(item, 'quantity');
+  renderDashboardItem(item);
+}
+
+function commitBuyOrderAmount(item, input) {
+  const control = getBuyOrderControl(item);
+  const price = parsePriceNumber(control.priceText);
+  const amount = Math.max(parseOperationNumber(input.value), 0);
+  const quantity = calculateBuyQuantityFromAmount(amount, price);
+
+  control.lastEdited = 'amount';
+  control.quantityText = quantity > 0 ? String(quantity) : '';
+  control.amountText = quantity > 0 && price > 0 ? formatAmountForInput(quantity * price) : (amount > 0 ? formatAmountForInput(amount) : '');
+  control.error = quantity > 0 ? '' : 'Monto insuficiente.';
+  renderDashboardItem(item);
+}
+
+function createBuyOrderForm(item) {
+  const control = getBuyOrderControl(item);
+  const disabled = !activeUsername || control.submitting || !item.selectedBuySymbol;
+
+  const form = document.createElement('div');
+  form.className = 'buy-order-form';
+
+  const priceInput = document.createElement('input');
+  priceInput.type = 'text';
+  priceInput.value = control.priceText || '';
+  priceInput.placeholder = item.buyPriceStep ? `Inc. ${formatPriceForInput(item.buyPriceStep, item.buyPriceStep)}` : 'Precio';
+  priceInput.disabled = disabled;
+  priceInput.setAttribute('aria-label', 'Precio por acción');
+
+  const quantityInput = document.createElement('input');
+  quantityInput.type = 'text';
+  quantityInput.value = control.quantityText || '';
+  quantityInput.disabled = disabled;
+  quantityInput.setAttribute('aria-label', 'Cantidad');
+
+  const amountInput = document.createElement('input');
+  amountInput.type = 'text';
+  amountInput.value = control.amountText || '';
+  amountInput.disabled = disabled;
+  amountInput.setAttribute('aria-label', 'Monto total');
+
+  priceInput.addEventListener('input', () => {
+    control.priceText = priceInput.value;
+    control.priceTouched = true;
+    syncBuyOrderControl(item, 'price');
+    quantityInput.value = control.quantityText || '';
+    amountInput.value = control.amountText || '';
+  });
+  priceInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      priceInput.blur();
+    }
+  });
+  priceInput.addEventListener('blur', () => {
+    commitBuyOrderPrice(item, priceInput);
+  });
+
+  quantityInput.addEventListener('input', () => {
+    control.quantityText = quantityInput.value;
+    control.error = '';
+    syncBuyOrderControl(item, 'quantity');
+    amountInput.value = control.amountText || '';
+  });
+  quantityInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      quantityInput.blur();
+    }
+  });
+  quantityInput.addEventListener('blur', () => {
+    commitBuyOrderQuantity(item, quantityInput);
+  });
+
+  amountInput.addEventListener('input', () => {
+    control.amountText = amountInput.value;
+    control.error = '';
+    syncBuyOrderControl(item, 'amount');
+    quantityInput.value = control.quantityText || '';
+  });
+  amountInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      amountInput.blur();
+    }
+  });
+  amountInput.addEventListener('blur', () => {
+    commitBuyOrderAmount(item, amountInput);
+  });
+
+  form.appendChild(createBuyOrderInput('Precio', priceInput));
+  form.appendChild(createBuyOrderInput('Cantidad', quantityInput));
+  form.appendChild(createBuyOrderInput('Monto', amountInput));
+  return form;
+}
+
+function getBuyOrderSubmitValues(item) {
+  const control = getBuyOrderControl(item);
+  const price = normalizePriceToStep(control.priceText, item.buyPriceStep);
+  if (!price || price <= 0) {
+    return { error: 'Indicá un precio válido.' };
+  }
+
+  let quantity = Math.max(Math.round(parseOperationNumber(control.quantityText)), 0);
+  if (quantity <= 0) {
+    quantity = calculateBuyQuantityFromAmount(parseOperationNumber(control.amountText), price);
+  }
+  if (quantity <= 0) {
+    return { error: 'Indicá cantidad o monto.' };
+  }
+
+  return {
+    price,
+    quantity,
+    amount: quantity * price,
+  };
+}
+
+async function handleBuyOrderSubmit(item) {
+  if (!canSubmitBuyOrder()) {
+    setStatus('Compra no disponible: todavía no hay flujo de órdenes configurado.', 'error');
+    return;
+  }
+  if (!item || item.type !== 'buyOrder') {
+    return;
+  }
+
+  const control = getBuyOrderControl(item);
+  if (control.submitting) {
+    return;
+  }
+  if (!item.selectedBuySymbol?.market) {
+    control.error = 'Seleccioná un símbolo.';
+    renderDashboardItem(item);
+    return;
+  }
+
+  const values = getBuyOrderSubmitValues(item);
+  if (values.error) {
+    control.error = values.error;
+    renderDashboardItem(item);
+    return;
+  }
+
+  const formattedPrice = formatPriceForInput(values.price, item.buyPriceStep);
+  const confirmed = await showDashboardConfirmDialog({
+    title: 'Confirmar Compra',
+    message: `Comprar ${item.selectedBuySymbol.symbol} x${values.quantity} a ${formattedPrice}`,
+    details: `${item.selectedBuySymbol.market} · ${formatNumber(values.amount)}`,
+    confirmLabel: 'Confirmar',
+    cancelLabel: 'Cancelar'
+  });
+  if (!confirmed) {
+    return;
+  }
+
+  control.submitting = true;
+  control.error = '';
+  renderDashboardItem(item);
+
+  try {
+    const response = await window.apiBroker.buyOrder({
+      mercado: item.selectedBuySymbol.market,
+      simbolo: item.selectedBuySymbol.symbol,
+      tipoOrden: 'precioLimite',
+      cantidad: values.quantity,
+      precio: values.price,
+      monto: values.amount,
+      plazo: getBuyOrderPlazo(item),
+    });
+
+    if (!response || response.estado !== 'ok') {
+      throw new Error(response?.mensaje || 'No se pudo enviar la orden.');
+    }
+
+    setStatus(`Orden de compra enviada: ${item.selectedBuySymbol.symbol} x${values.quantity}.`, 'ok');
+    invalidateDashboardCache('portfolio');
+    invalidateDashboardCache('operations');
+    invalidateDashboardCache('accountStatus');
+    refreshDashboardMoney({ force: true, silent: true });
+    cancelDashboardRequestsByType('portfolioActions');
+    cancelDashboardRequestsByType('summary');
+  } catch (error) {
+    control.error = error.message || 'No se pudo enviar la orden.';
+  } finally {
+    control.submitting = false;
+    renderDashboardItem(item);
+  }
+}
+
+function renderBuyOrderContent(container, item) {
+  const control = getBuyOrderControl(item);
+
+  if (!activeUsername) {
+    container.appendChild(createStateNode('No hay cuenta activa.', 'error'));
+    return;
+  }
+
+  const top = document.createElement('div');
+  top.className = 'buy-order-top';
+  top.appendChild(createBuyOrderSymbolButton(item));
+
+  const priceMeta = document.createElement('div');
+  priceMeta.className = 'buy-order-price-meta';
+
+  const lastPrice = document.createElement('span');
+  lastPrice.textContent = `UP ${formatOptionalNumber(item.buyLastPrice)}`;
+  priceMeta.appendChild(lastPrice);
+
+  if (item.buyPriceStep) {
+    const step = document.createElement('span');
+    step.textContent = `Inc ${formatPriceForInput(item.buyPriceStep, item.buyPriceStep)}`;
+    priceMeta.appendChild(step);
+  }
+
+  top.appendChild(priceMeta);
+  container.appendChild(top);
+
+  if (!item.selectedBuySymbol) {
+    container.appendChild(createStateNode('Seleccioná un símbolo.'));
+    return;
+  }
+
+  if (item.loading && !item.buyQuote) {
+    container.appendChild(createUpdatingIndicator('Cargando precio'));
+  } else if (item.loading) {
+    container.appendChild(createUpdatingIndicator('Actualizando precio'));
+  }
+
+  if (item.error) {
+    container.appendChild(createStateNode(item.error, 'error'));
+  }
+  if (control.error || item.buyPriceStepError) {
+    container.appendChild(createStateNode(control.error || item.buyPriceStepError, control.error ? 'error' : 'neutral'));
+  }
+
+  container.appendChild(createBuyOrderForm(item));
+
+  const submit = document.createElement('button');
+  submit.type = 'button';
+  submit.className = 'buy-order-submit';
+  submit.textContent = control.submitting ? 'Enviando' : 'Comprar';
+  submit.disabled = !canSubmitBuyOrder() || control.submitting || !item.selectedBuySymbol || !control.priceText;
+  if (!canSubmitBuyOrder()) {
+    submit.title = 'Compra no disponible: falta configurar el flujo de órdenes.';
+  } else if (!control.priceText) {
+    submit.title = 'Indicá un precio.';
+  } else {
+    submit.title = 'Enviar orden de compra';
+  }
+  if (!submit.disabled) {
+    submit.addEventListener('click', () => {
+      handleBuyOrderSubmit(item);
+    });
+  }
+  container.appendChild(submit);
+}
+
+function renderBuyOrderObject(item, root) {
+  root.appendChild(createObjectHeader(item, 'Orden de compra', {
+    showLastUpdated: true,
+    showInterval: true,
+    showRefreshControls: true,
+    titleText: 'Orden de compra'
+  }));
+
+  const body = document.createElement('div');
+  body.className = 'dashboard-object-body buy-order-body';
+
+  const content = document.createElement('div');
+  content.className = 'buy-order-content';
+  renderBuyOrderContent(content, item);
+
+  body.appendChild(content);
+  root.appendChild(body);
+}
+
 function renderDashboardItem(item) {
   const element = ensureDashboardObjectElement(item);
   updateItemFrame(item);
@@ -2408,6 +3531,8 @@ function renderDashboardItem(item) {
     renderFlagsObject(item, inner);
   } else if (item.type === 'portfolioActions') {
     renderPortfolioActionsObject(item, inner);
+  } else if (item.type === 'buyOrder') {
+    renderBuyOrderObject(item, inner);
   }
 }
 
@@ -2450,10 +3575,17 @@ function buildDashboardItem(type, position = null) {
     selectedSymbol: '',
     selectedStockKey: '',
     selectedStock: null,
+    selectedBuySymbolKey: '',
+    selectedBuySymbol: null,
     stockOptions: [],
     sourcesLoading: false,
     sourcesError: '',
     flags: null,
+    buyQuote: null,
+    buyLastPrice: null,
+    buyPriceStep: null,
+    buyPriceStepError: '',
+    buyOrderControl: null,
     portfolioRows: [],
     portfolioControls: {},
     stepsLoading: false,
@@ -2491,6 +3623,14 @@ function startDashboardItemDataLoad(item, options = {}) {
   if (item.type === 'portfolioActions') {
     configurePortfolioActionsTimer(item);
     loadPortfolioActionsItem(item.id, options);
+    return;
+  }
+  if (item.type === 'buyOrder') {
+    configureBuyOrderTimer(item);
+    beginDashboardSymbolLoading();
+    if (item.selectedBuySymbol) {
+      loadBuyOrderQuote(item.id, options);
+    }
   }
 }
 
@@ -2562,6 +3702,17 @@ function configurePortfolioActionsTimer(item) {
 
   item.timerId = setInterval(() => {
     loadPortfolioActionsItem(item.id, { source: 'auto' });
+  }, item.refreshIntervalSec * 1000);
+}
+
+function configureBuyOrderTimer(item) {
+  clearSummaryTimer(item);
+  if (item.type !== 'buyOrder' || !item.selectedBuySymbol || !item.selectedBuySymbol.market || !activeUsername || item.refreshPaused) {
+    return;
+  }
+
+  item.timerId = setInterval(() => {
+    loadBuyOrderQuote(item.id, { source: 'auto' });
   }, item.refreshIntervalSec * 1000);
 }
 
@@ -2865,9 +4016,12 @@ function handleRefreshIntervalChange(itemId, intervalSeconds) {
   } else if (item.type === 'flags') {
     lastFlagsRefreshInterval = intervalSeconds;
     configureFlagsTimer(item);
-  } else {
+  } else if (item.type === 'portfolioActions') {
     lastPortfolioRefreshInterval = intervalSeconds;
     configurePortfolioActionsTimer(item);
+  } else if (item.type === 'buyOrder') {
+    lastBuyOrderRefreshInterval = intervalSeconds;
+    configureBuyOrderTimer(item);
   }
   renderDashboardItem(item);
 
@@ -2881,6 +4035,8 @@ function handleRefreshIntervalChange(itemId, intervalSeconds) {
     loadFlagsForItem(item.id, { source: 'manual', force: true });
   } else if (item.type === 'portfolioActions') {
     loadPortfolioActionsItem(item.id, { source: 'manual', force: true });
+  } else if (item.type === 'buyOrder' && item.selectedBuySymbol) {
+    loadBuyOrderQuote(item.id, { source: 'manual', force: true });
   }
 }
 
@@ -2941,6 +4097,16 @@ async function loadFlagsStockOptions(itemId, options = {}) {
       buildPortfolioStockOptions(portfolioResponse),
       buildRecentOperationStockOptions(operationsResponse.operaciones),
     ]);
+    if (
+      latestItem.selectedStock
+      && !stockOptions.some((option) => option.key === latestItem.selectedStockKey)
+    ) {
+      stockOptions.push(latestItem.selectedStock);
+      stockOptions.sort((a, b) => {
+        const symbolCompare = a.symbol.localeCompare(b.symbol);
+        return symbolCompare !== 0 ? symbolCompare : safeText(a.market, '').localeCompare(safeText(b.market, ''));
+      });
+    }
 
     latestItem.stockOptions = stockOptions;
     latestItem.sourcesLoading = false;
@@ -2966,6 +4132,38 @@ async function loadFlagsStockOptions(itemId, options = {}) {
     latestItem.sourcesError = error.message || 'No se pudieron cargar acciones.';
     renderDashboardItem(latestItem);
   }
+}
+
+async function openFlagsSymbolPicker(itemId) {
+  const item = getItemById(itemId);
+  if (!item || item.type !== 'flags') {
+    return;
+  }
+
+  const selectedSymbol = await showDashboardSymbolPicker({
+    title: 'Nueva acción',
+    selectedKey: item.selectedStockKey || ''
+  });
+  if (!selectedSymbol) {
+    renderDashboardItem(item);
+    return;
+  }
+
+  const option = buildStockOptionFromDashboardSymbol(selectedSymbol);
+  const latestItem = getItemById(itemId);
+  if (!option || !latestItem || latestItem.type !== 'flags') {
+    return;
+  }
+
+  latestItem.stockOptions = mergeStockOptions([latestItem.stockOptions || [], [option]]);
+  latestItem.selectedStockKey = option.key;
+  latestItem.selectedStock = latestItem.stockOptions.find((candidate) => candidate.key === option.key) || option;
+  latestItem.flags = null;
+  latestItem.error = '';
+  latestItem.lastUpdatedAt = null;
+  configureFlagsTimer(latestItem);
+  renderDashboardItem(latestItem);
+  loadFlagsForItem(latestItem.id, { source: 'manual' });
 }
 
 function handleFlagsStockChange(itemId, stockKey) {
@@ -3039,6 +4237,73 @@ async function loadFlagsForItem(itemId, options = {}) {
       return;
     }
     latestItem.error = error.message || 'No se pudieron consultar puntas.';
+    latestItem.loading = false;
+    renderDashboardItem(latestItem);
+  }
+}
+
+async function loadBuyOrderQuote(itemId, options = {}) {
+  const item = getItemById(itemId);
+  if (!item || item.type !== 'buyOrder' || !activeUsername || item.loading || !item.selectedBuySymbol) {
+    return;
+  }
+
+  if (!item.selectedBuySymbol.market) {
+    item.error = 'No hay mercado disponible para comprar este símbolo.';
+    renderDashboardItem(item);
+    return;
+  }
+
+  const requestId = item.requestId + 1;
+  item.requestId = requestId;
+  item.loading = true;
+  item.error = '';
+  if (options.source !== 'auto' || !item.buyQuote) {
+    renderDashboardItem(item);
+  }
+
+  try {
+    const quoteData = await getDashboardQuoteFlags({
+      mercado: item.selectedBuySymbol.market,
+      simbolo: item.selectedBuySymbol.symbol,
+    }, {
+      force: Boolean(options.force)
+    });
+    const latestItem = getItemById(itemId);
+    if (!latestItem || latestItem.requestId !== requestId) {
+      return;
+    }
+
+    const response = quoteData.response;
+    if (response.estado !== 'ok' || !response.cotizacion) {
+      throw new Error(response.mensaje || 'No se pudo consultar el precio.');
+    }
+
+    const quote = response.cotizacion;
+    const prices = collectQuotePrices(quote);
+    const step = derivePriceStepFromPrices(prices);
+    latestItem.buyQuote = quote;
+    latestItem.buyLastPrice = parseOptionalNumber(quote.ultimoPrecio) ?? latestItem.selectedBuySymbol.lastPrice ?? null;
+    latestItem.buyPriceStep = step;
+    latestItem.buyPriceStepError = step ? '' : 'Incremento no disponible; precio sin normalizar.';
+    if (step) {
+      writePortfolioPriceStepCache(latestItem.selectedBuySymbol.market, latestItem.selectedBuySymbol.symbol, step);
+    }
+    applyBuyOrderLastPrice(latestItem, latestItem.buyLastPrice, step);
+    latestItem.lastUpdatedAt = quoteData.refreshedAt;
+    latestItem.error = '';
+    latestItem.loading = false;
+    renderDashboardItem(latestItem);
+
+    if (options.source !== 'auto') {
+      setStatus(`Precio actualizado: ${latestItem.selectedBuySymbol.symbol}.`, 'ok');
+    }
+  } catch (error) {
+    const latestItem = getItemById(itemId);
+    if (!latestItem || latestItem.requestId !== requestId) {
+      return;
+    }
+    latestItem.error = error.message || 'No se pudo consultar el precio.';
     latestItem.loading = false;
     renderDashboardItem(latestItem);
   }
@@ -3493,8 +4758,11 @@ async function refreshActiveAccount(options = {}) {
     if (!activeUsername) {
       invalidateDashboardCache('operations');
       invalidateDashboardCache('portfolio');
+      invalidateDashboardCache('accountStatus');
       invalidateDashboardCache('quoteFlags');
       portfolioPriceStepCache.clear();
+      resetDashboardSymbolState();
+      clearDashboardMoney();
       for (const item of dashboardItems) {
         if (isRefreshableItem(item)) {
           clearSummaryTimer(item);
@@ -3509,8 +4777,11 @@ async function refreshActiveAccount(options = {}) {
     if (changed) {
       invalidateDashboardCache('operations');
       invalidateDashboardCache('portfolio');
+      invalidateDashboardCache('accountStatus');
       invalidateDashboardCache('quoteFlags');
       portfolioPriceStepCache.clear();
+      resetDashboardSymbolState();
+      clearDashboardMoney();
       for (const item of dashboardItems) {
         if (item.type === 'summary') {
           resetSummaryItemData(item);
@@ -3534,6 +4805,19 @@ async function refreshActiveAccount(options = {}) {
           item.loading = false;
           item.stepsLoading = false;
           item.lastUpdatedAt = null;
+        } else if (item.type === 'buyOrder') {
+          clearSummaryTimer(item);
+          cancelDashboardItemRequests(item);
+          item.selectedBuySymbolKey = '';
+          item.selectedBuySymbol = null;
+          item.buyQuote = null;
+          item.buyLastPrice = null;
+          item.buyPriceStep = null;
+          item.buyPriceStepError = '';
+          item.buyOrderControl = null;
+          item.error = '';
+          item.loading = false;
+          item.lastUpdatedAt = null;
         }
       }
       renderAccountDependentItems();
@@ -3541,6 +4825,8 @@ async function refreshActiveAccount(options = {}) {
         source: options.initial ? 'startup' : 'manual',
         force: Boolean(options.force)
       });
+      beginDashboardSymbolLoading({ force: Boolean(options.force) });
+      refreshDashboardMoney({ force: Boolean(options.force), silent: true });
     }
   } catch (error) {
     if (refreshRequestId !== activeAccountRefreshRequestId) {
@@ -3550,8 +4836,11 @@ async function refreshActiveAccount(options = {}) {
     setPaletteEnabled(false);
     invalidateDashboardCache('operations');
     invalidateDashboardCache('portfolio');
+    invalidateDashboardCache('accountStatus');
     invalidateDashboardCache('quoteFlags');
     portfolioPriceStepCache.clear();
+    resetDashboardSymbolState();
+    clearDashboardMoney();
     for (const item of dashboardItems) {
       if (isRefreshableItem(item)) {
         clearSummaryTimer(item);
@@ -3573,6 +4862,7 @@ async function initialize() {
   const perf = startDashboardPerf('startup');
   syncEmptyState();
   setPaletteEnabled(false);
+  renderDashboardMoney();
 
   const layoutListPromise = refreshDashboardLayoutList('', { includeLastLayout: true });
   const accountPromise = refreshActiveAccount({ initial: true });
@@ -3609,6 +4899,9 @@ for (const item of paletteItems) {
 }
 
 panelToggleButton.addEventListener('click', toggleDashboardPanel);
+moneyRefreshButton?.addEventListener('click', () => {
+  refreshDashboardMoney({ force: true });
+});
 saveLayoutButton.addEventListener('click', saveDashboardLayout);
 loadLayoutButton.addEventListener('click', loadDashboardLayout);
 deleteLayoutButton.addEventListener('click', deleteDashboardLayout);
@@ -3624,6 +4917,10 @@ window.addEventListener('focus', () => {
   refreshActiveAccount();
 });
 window.addEventListener('beforeunload', () => {
+  activeMoneyRefreshRequestId += 1;
+  resetDashboardSymbolState();
+  closeActiveSymbolPicker(null);
+  closeActiveConfirmDialog(false);
   for (const item of dashboardItems) {
     if (isRefreshableItem(item)) {
       clearSummaryTimer(item);

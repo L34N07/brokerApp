@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('apiBroker', {
   getOperations: (filters) => ipcRenderer.invoke('broker:get-operations', filters),
   getQuoteFlags: (payload) => ipcRenderer.invoke('broker:get-quote-flags', payload),
   sellOrder: (payload) => ipcRenderer.invoke('broker:sell-order', payload),
+  buyOrder: (payload) => ipcRenderer.invoke('broker:buy-order', payload),
   cancelOperation: (payload) => ipcRenderer.invoke('broker:cancel-operation', payload),
   saveDashboardLayout: (payload) => ipcRenderer.invoke('broker:save-dashboard-layout', payload),
   loadDashboardLayout: (payload) => ipcRenderer.invoke('broker:load-dashboard-layout', payload),
